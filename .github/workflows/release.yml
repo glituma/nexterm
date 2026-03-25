@@ -1,3 +1,38 @@
+# ============================================================================
+# Release Workflow for NexTerm (RemoteKit)
+# ============================================================================
+#
+# AUTO-UPDATE SIGNING SETUP (required before first release):
+#
+# 1. Generate a signing keypair:
+#      npx @tauri-apps/cli signer generate -w ~/.tauri/nexterm.key
+#
+# 2. Add the PRIVATE key to GitHub Secrets:
+#      - Secret name: TAURI_SIGNING_PRIVATE_KEY
+#      - Value: the full content of ~/.tauri/nexterm.key
+#
+# 3. If the key has a password, add it to GitHub Secrets:
+#      - Secret name: TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+#      - Value: the password you used during key generation
+#
+# 4. Copy the PUBLIC key into tauri.conf.json:
+#      → plugins.updater.pubkey = "<your-public-key>"
+#
+# 5. Update the endpoint URL in tauri.conf.json with the actual owner/repo:
+#      → plugins.updater.endpoints = ["https://github.com/{owner}/{repo}/releases/latest/download/latest.json"]
+#
+# CRITICAL RELEASES:
+#   To mark a release as critical (forces mandatory update with no dismiss),
+#   include [CRITICAL] anywhere in the release notes body when creating the tag/release.
+#   The app client parses the release body for this marker.
+#
+# HOW IT WORKS:
+#   - On tag push (v*), this workflow builds for all platforms
+#   - tauri-action signs the updater artifacts using TAURI_SIGNING_PRIVATE_KEY
+#   - Releases are published immediately (not draft) so latest.json is served
+#   - The app checks https://github.com/{owner}/{repo}/releases/latest/download/latest.json
+# ============================================================================
+
 name: Release RemoteKit
 
 on:
@@ -78,6 +113,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'RemoteKit ${{ github.ref_name }}'
@@ -99,6 +136,6 @@ jobs:
             - 🚇 SSH Tunnels (local + remote)
             - 🌐 Inglés y Español
             - 📤 Export/Import de perfiles
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }}

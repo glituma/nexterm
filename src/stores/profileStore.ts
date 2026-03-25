@@ -21,6 +21,7 @@ interface ProfileStoreState {
   saveProfile: (profile: ConnectionProfile) => Promise<string>;
   deleteProfile: (id: string) => Promise<void>;
   storeCredential: (profileId: string, password: string) => Promise<void>;
+  reorderProfiles: (ids: string[]) => Promise<void>;
   exportProfiles: (exportPath: string, includeCredentials: boolean, exportPassword?: string) => Promise<number>;
   importProfiles: (importPath: string, importPassword?: string) => Promise<ImportResult>;
   clearError: () => void;
@@ -84,6 +85,28 @@ export const useProfileStore = create<ProfileStoreState>((set) => ({
       // Non-blocking — log but don't prevent connection
       console.error("Failed to store credential:", err);
       set({ error: `Vault error: ${String(err)}` });
+    }
+  },
+
+  reorderProfiles: async (ids: string[]) => {
+    set({ error: null });
+    try {
+      // Optimistic update — reorder locally first
+      set((state) => {
+        const profileMap = new Map(state.profiles.map((p) => [p.id, p]));
+        const reordered = ids
+          .map((id) => profileMap.get(id))
+          .filter((p): p is ConnectionProfile => p !== undefined);
+        return { profiles: reordered };
+      });
+      await tauriInvoke<void>("reorder_profiles", { profileIds: ids });
+    } catch (err) {
+      set({ error: String(err) });
+      // Reload from backend on error to restore correct order
+      try {
+        const profiles = await tauriInvoke<ConnectionProfile[]>("load_profiles");
+        set({ profiles });
+      } catch { /* ignore reload error */ }
     }
   },
 

@@ -1,10 +1,12 @@
 // features/sftp/FilePane.tsx — Single file listing pane (used for both local and remote)
 //
-// Shows: breadcrumb path, sortable table columns, file rows with icons,
-// loading state, empty state, error state.
+// Shows: PathBar (nav + always-editable path input), sortable table columns,
+// file rows with icons, loading state, empty state, error state.
+// Supports keyboard navigation: Arrow Up/Down, Enter, Backspace.
 
 import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { Spinner } from "../../components/ui/Spinner";
+import { PathBar } from "./PathBar";
 import { useI18n } from "../../lib/i18n";
 import type { FileEntry, SearchResult } from "../../lib/types";
 import type { PaneSource, SortConfig, SortField, FileAction } from "./sftp.types";
@@ -37,6 +39,15 @@ interface FilePaneProps {
   onSearchModeChange?: (mode: SearchMode) => void;
   onSearchSubmit?: () => void;
   onSearchClear?: () => void;
+  // Navigation history (for PathBar)
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  onGoBack?: () => void;
+  onGoForward?: () => void;
+  onGoHome?: () => void;
+  // Focus management (PR3)
+  isFocused?: boolean;
+  onPaneFocus?: () => void;
 }
 
 // ─── Utilities ──────────────────────────────────────────
@@ -121,46 +132,6 @@ function sortEntries(entries: FileEntry[], sort: SortConfig): FileEntry[] {
   return sorted;
 }
 
-// ─── Breadcrumb ─────────────────────────────────────────
-
-function Breadcrumb({
-  path,
-  onNavigate,
-}: {
-  path: string;
-  onNavigate: (path: string) => void;
-}) {
-  const segments = path.split("/").filter(Boolean);
-
-  return (
-    <div className="sftp-breadcrumb">
-      <button
-        className="sftp-breadcrumb-segment sftp-breadcrumb-root"
-        onClick={() => onNavigate("/")}
-        title="Go to root"
-      >
-        /
-      </button>
-      {segments.map((segment, idx) => {
-        const segPath = "/" + segments.slice(0, idx + 1).join("/");
-        const isLast = idx === segments.length - 1;
-        return (
-          <span key={segPath}>
-            <span className="sftp-breadcrumb-separator">{"\u203A"}</span>
-            <button
-              className={`sftp-breadcrumb-segment ${isLast ? "sftp-breadcrumb-current" : ""}`}
-              onClick={() => !isLast && onNavigate(segPath)}
-              disabled={isLast}
-            >
-              {segment}
-            </button>
-          </span>
-        );
-      })}
-    </div>
-  );
-}
-
 // ─── Column Header ──────────────────────────────────────
 
 function ColumnHeader({
@@ -214,6 +185,13 @@ export function FilePane({
   onSearchModeChange,
   onSearchSubmit,
   onSearchClear,
+  canGoBack,
+  canGoForward,
+  onGoBack,
+  onGoForward,
+  onGoHome,
+  isFocused,
+  onPaneFocus,
 }: FilePaneProps) {
   const { t } = useI18n();
   const [sort, setSort] = useState<SortConfig>({
@@ -221,6 +199,8 @@ export function FilePane({
     direction: "asc",
   });
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const tableBodyRef = useRef<HTMLDivElement>(null);
+  const [focusedIndex, setFocusedIndex] = useState(-1);
 
   const handleSort = useCallback((field: SortField) => {
     setSort((prev) => ({
@@ -250,6 +230,75 @@ export function FilePane({
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [onSearchQueryChange]);
+
+  // Reset focusedIndex when entries change (e.g., navigated to new dir)
+  useEffect(() => {
+    setFocusedIndex(-1);
+  }, [path]);
+
+  // ─── Keyboard Navigation (PR3) ───────────────────────
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      // Don't handle keyboard nav when search/filter input is focused
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement
+      ) {
+        return;
+      }
+
+      const items = sortedEntries;
+      if (items.length === 0) return;
+
+      switch (e.key) {
+        case "ArrowDown": {
+          e.preventDefault();
+          const nextIdx = Math.min(focusedIndex + 1, items.length - 1);
+          setFocusedIndex(nextIdx);
+          const entry = items[nextIdx];
+          if (entry && onSelectionChange) {
+            onSelectionChange(new Set([entry.path]));
+          }
+          // Scroll into view
+          const row = tableBodyRef.current?.children[nextIdx] as HTMLElement | undefined;
+          row?.scrollIntoView({ block: "nearest" });
+          break;
+        }
+        case "ArrowUp": {
+          e.preventDefault();
+          const prevIdx = Math.max(focusedIndex - 1, 0);
+          setFocusedIndex(prevIdx);
+          const entry = items[prevIdx];
+          if (entry && onSelectionChange) {
+            onSelectionChange(new Set([entry.path]));
+          }
+          const row = tableBodyRef.current?.children[prevIdx] as HTMLElement | undefined;
+          row?.scrollIntoView({ block: "nearest" });
+          break;
+        }
+        case "Enter": {
+          e.preventDefault();
+          const entry = items[focusedIndex];
+          if (!entry) return;
+          if (isNavigable(entry)) {
+            onNavigate(entry.path);
+          } else if (
+            entry.fileType === "file" ||
+            (entry.fileType === "symlink" && entry.linkTarget === "file")
+          ) {
+            onFileAction?.({ type: "open", entry });
+          }
+          break;
+        }
+        case "Backspace": {
+          e.preventDefault();
+          onNavigateUp();
+          break;
+        }
+      }
+    },
+    [sortedEntries, focusedIndex, onSelectionChange, onNavigate, onNavigateUp, onFileAction],
+  );
 
   // Whether we're showing search results (recursive mode with results)
   const showSearchResults = searchMode === "search" && searchResults && searchResults.length > 0 && !searchLoading;
@@ -384,13 +433,16 @@ export function FilePane({
 
   return (
     <div
-      className="sftp-pane"
+      className={`sftp-pane ${isFocused ? "sftp-pane-focused" : ""}`}
       onDragOver={handleDragOver}
       onDrop={handleDrop}
       onContextMenu={(e) => {
         e.preventDefault();
         onContextMenu?.(e, null);
       }}
+      onClick={onPaneFocus}
+      onKeyDown={handleKeyDown}
+      tabIndex={0}
     >
       {/* Header */}
       <div className="sftp-pane-header">
@@ -411,6 +463,20 @@ export function FilePane({
           </button>
         </div>
       </div>
+
+      {/* PathBar (nav buttons + always-editable path input) */}
+      {path && !showSearchResults && (
+        <PathBar
+          source={source}
+          path={path}
+          onNavigate={onNavigate}
+          canGoBack={canGoBack ?? false}
+          canGoForward={canGoForward ?? false}
+          onGoBack={onGoBack ?? (() => {})}
+          onGoForward={onGoForward ?? (() => {})}
+          onGoHome={onGoHome ?? (() => {})}
+        />
+      )}
 
       {/* Search Bar (remote pane only) */}
       {hasSearch && (
@@ -480,9 +546,6 @@ export function FilePane({
         </div>
       )}
 
-      {/* Breadcrumb */}
-      {path && !showSearchResults && <Breadcrumb path={path} onNavigate={onNavigate} />}
-
       {/* Search results view (recursive mode) */}
       {showSearchResults ? (
         <>
@@ -528,7 +591,7 @@ export function FilePane({
           </div>
 
           {/* Content */}
-          <div className="sftp-table-body">
+          <div className="sftp-table-body" ref={tableBodyRef}>
             {(loading || searchLoading) && (
               <div className="sftp-state-message">
                 <Spinner size={20} />
@@ -558,12 +621,13 @@ export function FilePane({
             {!loading &&
               !searchLoading &&
               !error &&
-              sortedEntries.map((entry) => {
+              sortedEntries.map((entry, idx) => {
                 const isSelected = selectedEntries?.has(entry.path) ?? false;
+                const isKeyboardFocused = idx === focusedIndex;
                 return (
                   <div
                     key={entry.path}
-                    className={`sftp-row ${isSelected ? "sftp-row-selected" : ""}`}
+                    className={`sftp-row ${isSelected ? "sftp-row-selected" : ""} ${isKeyboardFocused ? "sftp-row-focused" : ""}`}
                     onClick={(e) => handleRowClick(entry, e)}
                     onDoubleClick={() => handleRowDoubleClick(entry)}
                     onContextMenu={(e) => {

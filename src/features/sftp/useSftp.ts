@@ -167,6 +167,22 @@ export function useSftp(sessionId: SessionId) {
     }
   }, [remotePane.historyIndex, remotePane.history, listRemoteDir]);
 
+  const goRemoteForward = useCallback(() => {
+    if (remotePane.historyIndex < remotePane.history.length - 1) {
+      const nextPath = remotePane.history[remotePane.historyIndex + 1];
+      if (!nextPath) return;
+      navigatingHistoryRef.current = true;
+      setRemotePane((prev) => ({ ...prev, historyIndex: prev.historyIndex + 1 }));
+      void listRemoteDir(nextPath);
+    }
+  }, [remotePane.historyIndex, remotePane.history, listRemoteDir]);
+
+  const goRemoteHome = useCallback(() => {
+    if (remoteHome) {
+      void listRemoteDir(remoteHome);
+    }
+  }, [remoteHome, listRemoteDir]);
+
   const refreshRemote = useCallback(() => {
     if (remotePane.path) {
       // Refresh shouldn't push a new history entry either
@@ -177,11 +193,26 @@ export function useSftp(sessionId: SessionId) {
 
   // ─── Local Operations ─────────────────────────────────
 
+  // Flag to suppress history push during back/forward navigation for local pane
+  const localNavigatingHistoryRef = useRef(false);
+
   const listLocalDir = useCallback(async (path: string) => {
     setLocalPane((prev) => ({ ...prev, loading: true, error: null }));
     try {
       const entries = await tauriInvoke<FileEntry[]>("list_local_dir", { path });
+      const skipHistory = localNavigatingHistoryRef.current;
+      localNavigatingHistoryRef.current = false;
       setLocalPane((prev) => {
+        if (skipHistory) {
+          // Navigating via history — don't push a new entry
+          return {
+            ...prev,
+            path,
+            entries,
+            loading: false,
+            error: null,
+          };
+        }
         const newHistory = [...prev.history.slice(0, prev.historyIndex + 1), path];
         return {
           path,
@@ -193,6 +224,7 @@ export function useSftp(sessionId: SessionId) {
         };
       });
     } catch (err) {
+      localNavigatingHistoryRef.current = false;
       setLocalPane((prev) => ({
         ...prev,
         loading: false,
@@ -213,8 +245,39 @@ export function useSftp(sessionId: SessionId) {
     void listLocalDir(parent);
   }, [localPane.path, listLocalDir]);
 
+  const goLocalBack = useCallback(() => {
+    if (localPane.historyIndex > 0) {
+      const prevPath = localPane.history[localPane.historyIndex - 1];
+      if (!prevPath) return;
+      localNavigatingHistoryRef.current = true;
+      setLocalPane((prev) => ({ ...prev, historyIndex: prev.historyIndex - 1 }));
+      void listLocalDir(prevPath);
+    }
+  }, [localPane.historyIndex, localPane.history, listLocalDir]);
+
+  const goLocalForward = useCallback(() => {
+    if (localPane.historyIndex < localPane.history.length - 1) {
+      const nextPath = localPane.history[localPane.historyIndex + 1];
+      if (!nextPath) return;
+      localNavigatingHistoryRef.current = true;
+      setLocalPane((prev) => ({ ...prev, historyIndex: prev.historyIndex + 1 }));
+      void listLocalDir(nextPath);
+    }
+  }, [localPane.historyIndex, localPane.history, listLocalDir]);
+
+  const goLocalHome = useCallback(async () => {
+    try {
+      const { homeDir } = await import("@tauri-apps/api/path");
+      const home = await homeDir();
+      void listLocalDir(home);
+    } catch {
+      void listLocalDir("/");
+    }
+  }, [listLocalDir]);
+
   const refreshLocal = useCallback(() => {
     if (localPane.path) {
+      localNavigatingHistoryRef.current = true;
       void listLocalDir(localPane.path);
     }
   }, [localPane.path, listLocalDir]);
@@ -421,12 +484,17 @@ export function useSftp(sessionId: SessionId) {
     navigateRemote,
     navigateRemoteUp,
     goRemoteBack,
+    goRemoteForward,
+    goRemoteHome,
     refreshRemote,
     listRemoteDir,
 
     // Local navigation
     navigateLocal,
     navigateLocalUp,
+    goLocalBack,
+    goLocalForward,
+    goLocalHome,
     refreshLocal,
     listLocalDir,
 

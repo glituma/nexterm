@@ -85,6 +85,11 @@ export const en = {
   "hostKey.connectWithoutSaving": "Connect without saving",
   "hostKey.acceptNewKey": "Accept New Key",
   "hostKey.disconnect": "Disconnect",
+  "hostKey.keyTypeChangedTitle": "Key Algorithm Changed",
+  "hostKey.keyTypeChangedWarning": "The server {host} now uses a different key algorithm. This is usually a routine upgrade and not a security concern.",
+  "hostKey.keyTypeChangedAdvice": "Verify with your server administrator if you didn't expect this change.",
+  "hostKey.oldKeyType": "Previous algorithm",
+  "hostKey.newKeyType": "Current algorithm",
   "hostKey.cancel": "Cancel",
   "hostKey.copied": "Copied!",
 
@@ -121,6 +126,12 @@ export const en = {
   "sftp.downloadTitle": "Download selected remote files to local",
   "sftp.refreshTitle": "Refresh both panes",
   "sftp.newFolderTitle": "New folder on remote",
+
+  // SFTP navigation
+  "sftp.goBack": "Go back",
+  "sftp.goForward": "Go forward",
+  "sftp.goHome": "Go to home directory",
+  "sftp.navigateTo": "Navigate to path",
 
   // SFTP pane
   "sftp.local": "Local",
@@ -167,6 +178,10 @@ export const en = {
   "sftp.downloading": "Downloading to open...",
   "sftp.downloadingProgress": "Downloading {name}...",
   "sftp.savingAs": "Saving {name}...",
+
+  // SFTP drag & drop (PR2)
+  "sftp.dropToUpload": "Drop files here to upload",
+  "sftp.uploadError": "Failed to upload {name}",
 
   // Context menu
   "ctx.open": "Open",
@@ -267,6 +282,21 @@ export const en = {
   "vault.reset.irreversible": "This action cannot be undone.",
   "vault.reset.confirm": "Reset Vault",
   "vault.reset.success": "Vault has been reset. Create a new master password.",
+
+  // Update
+  "update.available": "Update Available",
+  "update.newVersion": "Version {version} is available",
+  "update.releaseNotes": "Release Notes",
+  "update.updateNow": "Update Now",
+  "update.later": "Later",
+  "update.downloading": "Downloading update...",
+  "update.installing": "Installing update...",
+  "update.progress": "{percentage}% ({downloaded} / {total})",
+  "update.error": "Update failed",
+  "update.retry": "Retry",
+  "update.critical": "Critical Update Required",
+  "update.criticalMessage": "A critical security update must be installed before continuing",
+  "update.statusBadge": "Update available",
 
   // General
   "general.ok": "OK",

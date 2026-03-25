@@ -378,6 +378,7 @@ pub async fn test_connection(
         auth_method,
         startup_directory: None,
         tunnels: vec![],
+        display_order: 0,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };

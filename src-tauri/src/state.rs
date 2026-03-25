@@ -139,7 +139,12 @@ pub enum TransferDirection {
 // ─── Transfer Events (streamed via Tauri Channel) ───────
 
 #[derive(Clone, Serialize)]
-#[serde(tag = "event", content = "data", rename_all = "camelCase")]
+#[serde(
+    tag = "event",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum TransferEvent {
     Started {
         transfer_id: TransferId,
@@ -181,6 +186,7 @@ pub struct TunnelHandle {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TunnelConfig {
+    #[serde(default)]
     pub id: TunnelId,
     pub tunnel_type: TunnelType,
     pub bind_host: String,
@@ -209,7 +215,12 @@ pub enum TunnelState {
 // ─── Tunnel Events (streamed via Tauri Channel) ─────────
 
 #[derive(Clone, Serialize)]
-#[serde(tag = "event", content = "data", rename_all = "camelCase")]
+#[serde(
+    tag = "event",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum TunnelEvent {
     StateChanged {
         tunnel_id: TunnelId,
@@ -300,6 +311,11 @@ pub enum HostKeyStatus {
         new_fingerprint: String,
         #[serde(rename = "keyType")]
         key_type: String,
+        /// Set when the stored key uses a different algorithm than the server's
+        /// current key (e.g. ssh-rsa → ssh-ed25519). `None` when the key type
+        /// is the same (i.e. a genuine fingerprint change — potentially dangerous).
+        #[serde(rename = "oldKeyType", skip_serializing_if = "Option::is_none")]
+        old_key_type: Option<String>,
     },
     Revoked,
 }

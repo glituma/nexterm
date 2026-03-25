@@ -116,7 +116,83 @@ export function HostKeyDialog({ open, request, onRespond }: HostKeyDialogProps) 
     ? request.host
     : `${request.host}:${request.port}`;
 
-  // ─── CHANGED: Dangerous flow ────────────────────────
+  // ─── CHANGED (different key type): Benign algorithm upgrade ──
+  if (isChanged && request.status.type === "changed" && request.status.oldKeyType) {
+    return (
+      <div className="hk-overlay" onClick={() => onRespond("reject")}>
+        <div className="hk-modal hk-modal-warning" onClick={(e) => e.stopPropagation()}>
+          {/* Header */}
+          <div className="hk-header hk-header-warning">
+            <div className="hk-header-icon hk-icon-warning">
+              <ShieldAlertIcon />
+            </div>
+            <div className="hk-header-text">
+              <h3 className="hk-title">{t("hostKey.keyTypeChangedTitle")}</h3>
+            </div>
+          </div>
+
+          {/* Info banner — softer warning */}
+          <div className="hk-warning-banner">
+            <p className="hk-warning-text">
+              {t("hostKey.keyTypeChangedWarning", { host: hostStr })}
+            </p>
+            <p className="hk-warning-advice">
+              {t("hostKey.keyTypeChangedAdvice")}
+            </p>
+          </div>
+
+          {/* Key type comparison + fingerprints */}
+          <div className="hk-body">
+            <div className="hk-info-card">
+              <div className="hk-info-row">
+                <span className="hk-info-label">{t("hostKey.host")}</span>
+                <code className="hk-info-value">{hostStr}</code>
+              </div>
+              <div className="hk-info-row">
+                <span className="hk-info-label">{t("hostKey.oldKeyType")}</span>
+                <code className="hk-info-value">{request.status.oldKeyType}</code>
+              </div>
+              <div className="hk-info-row">
+                <span className="hk-info-label">{t("hostKey.newKeyType")}</span>
+                <code className="hk-info-value">{request.status.keyType}</code>
+              </div>
+            </div>
+
+            <div className="hk-fp-comparison">
+              <FingerprintValue
+                label={t("hostKey.oldFingerprint")}
+                value={request.status.oldFingerprint}
+              />
+              <FingerprintValue
+                label={t("hostKey.newFingerprint")}
+                value={request.status.newFingerprint}
+              />
+            </div>
+          </div>
+
+          {/* Actions — primary is Accept since this is generally benign */}
+          <div className="hk-actions">
+            <button
+              className="hk-btn hk-btn-ghost"
+              onClick={() => onRespond("reject")}
+              type="button"
+            >
+              {t("hostKey.disconnect")}
+            </button>
+            <button
+              className="hk-btn hk-btn-primary"
+              onClick={() => onRespond("acceptAndSave")}
+              type="button"
+            >
+              {t("hostKey.acceptNewKey")}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ─── CHANGED (same key type): Dangerous fingerprint change ──
   if (isChanged && request.status.type === "changed") {
     return (
       <div className="hk-overlay" onClick={() => onRespond("reject")}>

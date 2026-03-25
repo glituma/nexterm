@@ -87,6 +87,11 @@ export const es: Record<TranslationKey, string> = {
   "hostKey.connectWithoutSaving": "Conectar sin guardar",
   "hostKey.acceptNewKey": "Aceptar Nueva Clave",
   "hostKey.disconnect": "Desconectar",
+  "hostKey.keyTypeChangedTitle": "Algoritmo de Clave Modificado",
+  "hostKey.keyTypeChangedWarning": "El servidor {host} ahora usa un algoritmo de clave diferente. Esto suele ser una actualización de rutina y no representa un riesgo de seguridad.",
+  "hostKey.keyTypeChangedAdvice": "Verificá con el administrador del servidor si no esperabas este cambio.",
+  "hostKey.oldKeyType": "Algoritmo anterior",
+  "hostKey.newKeyType": "Algoritmo actual",
   "hostKey.cancel": "Cancelar",
   "hostKey.copied": "¡Copiado!",
 
@@ -123,6 +128,12 @@ export const es: Record<TranslationKey, string> = {
   "sftp.downloadTitle": "Descargar archivos remotos seleccionados al local",
   "sftp.refreshTitle": "Actualizar ambos paneles",
   "sftp.newFolderTitle": "Nueva carpeta en remoto",
+
+  // SFTP navigation
+  "sftp.goBack": "Volver",
+  "sftp.goForward": "Avanzar",
+  "sftp.goHome": "Ir al directorio home",
+  "sftp.navigateTo": "Navegar a la ruta",
 
   // SFTP pane
   "sftp.local": "Local",
@@ -169,6 +180,10 @@ export const es: Record<TranslationKey, string> = {
   "sftp.downloading": "Descargando para abrir...",
   "sftp.downloadingProgress": "Descargando {name}...",
   "sftp.savingAs": "Guardando {name}...",
+
+  // SFTP drag & drop (PR2)
+  "sftp.dropToUpload": "Soltá los archivos acá para subir",
+  "sftp.uploadError": "Error al subir {name}",
 
   // Context menu
   "ctx.open": "Abrir",
@@ -269,6 +284,21 @@ export const es: Record<TranslationKey, string> = {
   "vault.reset.irreversible": "Esta acción no se puede deshacer.",
   "vault.reset.confirm": "Restablecer Bóveda",
   "vault.reset.success": "La bóveda fue restablecida. Creá una nueva contraseña maestra.",
+
+  // Update
+  "update.available": "Actualización Disponible",
+  "update.newVersion": "La versión {version} está disponible",
+  "update.releaseNotes": "Notas de la Versión",
+  "update.updateNow": "Actualizar Ahora",
+  "update.later": "Más Tarde",
+  "update.downloading": "Descargando actualización...",
+  "update.installing": "Instalando actualización...",
+  "update.progress": "{percentage}% ({downloaded} / {total})",
+  "update.error": "Error en la actualización",
+  "update.retry": "Reintentar",
+  "update.critical": "Actualización Crítica Requerida",
+  "update.criticalMessage": "Se debe instalar una actualización de seguridad crítica antes de continuar",
+  "update.statusBadge": "Actualización disponible",
 
   // General
   "general.ok": "OK",

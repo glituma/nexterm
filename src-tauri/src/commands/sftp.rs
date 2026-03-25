@@ -757,3 +757,32 @@ pub async fn list_local_dir(path: String) -> Result<Vec<FileEntry>, AppError> {
 
     Ok(entries)
 }
+
+// ─── Open Local File with System Default App ────────────
+
+/// Open a local file with the operating system's default application.
+///
+/// This is used when the user double-clicks a file in the LOCAL pane of the
+/// SFTP browser. Local files should NOT go through SFTP — they should open
+/// natively (e.g., TextEdit, VS Code, Preview, etc.).
+#[tauri::command]
+pub async fn open_local_file(path: String) -> Result<(), AppError> {
+    let file_path = std::path::Path::new(&path);
+
+    if !file_path.exists() {
+        return Err(AppError::Sftp(format!(
+            "File does not exist: {}",
+            path
+        )));
+    }
+
+    open::that(&path).map_err(|e| {
+        AppError::Sftp(format!(
+            "Failed to open '{}' with system app: {e}",
+            path
+        ))
+    })?;
+
+    tracing::info!("Opened local file with system app: {}", path);
+    Ok(())
+}

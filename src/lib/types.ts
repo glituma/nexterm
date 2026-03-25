@@ -21,6 +21,7 @@ export interface ConnectionProfile {
   authMethod: AuthMethodConfig;
   startupDirectory?: string;
   tunnels: TunnelConfig[];
+  displayOrder?: number;
   createdAt: string; // ISO 8601
   updatedAt: string; // ISO 8601
 }
@@ -158,6 +159,9 @@ export type HostKeyStatus =
       oldFingerprint: string;
       newFingerprint: string;
       keyType: string;
+      /** Set when the stored key used a different algorithm (e.g. ssh-rsa).
+       *  Absent when the key type is the same (genuine fingerprint change). */
+      oldKeyType?: string;
     }
   | { type: "revoked" };
 

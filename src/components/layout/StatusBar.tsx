@@ -1,11 +1,16 @@
-// components/layout/StatusBar.tsx — Bottom status bar with language switcher
+// components/layout/StatusBar.tsx — Bottom status bar with language switcher + update badge
 
 import { useSessionStore } from "../../stores/sessionStore";
+import { useUpdateStore } from "../../stores/updateStore";
 import { useI18n, type Locale } from "../../lib/i18n";
 
 export function StatusBar() {
   const { t, locale, setLocale } = useI18n();
   const { sessions } = useSessionStore();
+  const { status, isCritical } = useUpdateStore();
+
+  // Show badge when user dismissed a normal update
+  const showUpdateBadge = status === "dismissed" && !isCritical;
 
   const connectedCount = Array.from(sessions.values()).filter(
     (s) => s.state === "connected",
@@ -18,6 +23,11 @@ export function StatusBar() {
 
   const toggleLocale = () => {
     setLocale(locale === "en" ? "es" : "en" as Locale);
+  };
+
+  const handleUpdateBadgeClick = () => {
+    // Re-open the update dialog by setting status back to available
+    useUpdateStore.getState().setStatus("available");
   };
 
   return (
@@ -33,6 +43,16 @@ export function StatusBar() {
           : t("status.terminal", { count: totalTerminals })}
       </span>
       <div className="statusbar-spacer" />
+      {showUpdateBadge && (
+        <button
+          className="statusbar-update-badge"
+          onClick={handleUpdateBadgeClick}
+          title={t("update.statusBadge")}
+        >
+          <span className="statusbar-update-dot" />
+          {t("update.statusBadge")}
+        </button>
+      )}
       <button
         className="statusbar-lang-toggle"
         onClick={toggleLocale}

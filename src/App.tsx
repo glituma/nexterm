@@ -2,19 +2,22 @@
 //
 // Orchestrates: vault unlock, layout, connection dialogs, terminal + SFTP view routing
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { AppLayout } from "./components/layout/AppLayout";
 import { TabBar } from "./components/layout/TabBar";
 import { ConnectionDialog } from "./features/connection/ConnectionDialog";
 import { HostKeyDialog } from "./features/connection/HostKeyDialog";
 import { AuthPrompt } from "./features/connection/AuthPrompt";
 import { VaultScreen } from "./features/vault/VaultScreen";
+import { UpdateDialog } from "./features/updater/UpdateDialog";
+import { CriticalUpdateScreen } from "./features/updater/CriticalUpdateScreen";
 import { TerminalTabs } from "./features/terminal/TerminalTabs";
 import { SftpBrowser } from "./features/sftp/SftpBrowser";
 import { TunnelManager } from "./features/tunnel/TunnelManager";
 import { useSessionStore } from "./stores/sessionStore";
 import { useProfileStore } from "./stores/profileStore";
 import { useConnection } from "./features/connection/useConnection";
+import { useUpdater } from "./features/updater/useUpdater";
 import { useI18n } from "./lib/i18n";
 import { tauriInvoke } from "./lib/tauri";
 
@@ -61,6 +64,21 @@ function App() {
       }
     })();
   }, []);
+
+  // ── Auto-update check ────────────────────────────────
+  const { checkForUpdate } = useUpdater();
+  const updateCheckDone = useRef(false);
+
+  useEffect(() => {
+    if (!vaultReady || updateCheckDone.current) return;
+    updateCheckDone.current = true;
+
+    const timer = setTimeout(() => {
+      void checkForUpdate();
+    }, 5000);
+
+    return () => clearTimeout(timer);
+  }, [vaultReady, checkForUpdate]);
 
   const handleVaultUnlocked = useCallback(() => {
     setVaultReady(true);
@@ -194,6 +212,10 @@ function App() {
         onSubmit={submitPassword}
         onCancel={cancelConnect}
       />
+
+      {/* Update modals */}
+      <UpdateDialog />
+      <CriticalUpdateScreen />
     </>
   );
 }

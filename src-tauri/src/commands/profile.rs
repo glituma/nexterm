@@ -41,9 +41,15 @@ pub async fn save_profile(
 
     // Check if updating existing or creating new
     if let Some(existing) = profiles.iter_mut().find(|p| p.id == profile_data.id) {
+        // Preserve display_order on update unless explicitly changed
+        if profile_data.display_order == 0 && existing.display_order != 0 {
+            profile_data.display_order = existing.display_order;
+        }
         *existing = profile_data.clone();
     } else {
-        // New profile — ensure it has a fresh created_at
+        // New profile — assign next available display_order
+        let max_order = profiles.iter().map(|p| p.display_order).max().unwrap_or(0);
+        profile_data.display_order = max_order + 1;
         profile_data.created_at = chrono::Utc::now();
         profiles.push(profile_data.clone());
     }
@@ -121,6 +127,32 @@ pub async fn get_profile(
         .find(|p| p.id == profile_id)
         .cloned()
         .ok_or_else(|| AppError::ProfileError(format!("Profile not found: {profile_id}")))
+}
+
+// ─── Reorder Profiles ───────────────────────────────
+
+#[tauri::command]
+pub async fn reorder_profiles(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    profile_ids: Vec<Uuid>,
+) -> Result<(), AppError> {
+    let mut profiles = state.profiles.lock().await;
+    let app_data_dir = get_app_data_dir(&app);
+
+    // Update display_order based on the position in the provided list
+    for (index, id) in profile_ids.iter().enumerate() {
+        if let Some(profile) = profiles.iter_mut().find(|p| &p.id == id) {
+            profile.display_order = index as i32;
+        }
+    }
+
+    // Sort in-memory to match the new order
+    profiles.sort_by_key(|p| p.display_order);
+
+    profile::save_profiles_to_disk(&profiles, app_data_dir.as_ref())?;
+
+    Ok(())
 }
 
 // ─── Export / Import ────────────────────────────────────
@@ -321,6 +353,7 @@ pub async fn import_profiles(
 
         let now = chrono::Utc::now();
         let new_id = Uuid::new_v4();
+        let max_order = profiles.iter().map(|p| p.display_order).max().unwrap_or(0);
         let new_profile = ConnectionProfile {
             id: new_id,
             name: ep.name.clone(),
@@ -330,6 +363,7 @@ pub async fn import_profiles(
             auth_method,
             startup_directory: None,
             tunnels: Vec::new(),
+            display_order: max_order + 1,
             created_at: now,
             updated_at: now,
         };

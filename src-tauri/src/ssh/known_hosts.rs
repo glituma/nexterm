@@ -59,6 +59,22 @@ fn base64_encode_nopad(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD_NO_PAD.encode(data)
 }
 
+/// Compute SHA-256 fingerprint from a base64-encoded key (as stored in known_hosts).
+/// Returns a human-readable "SHA256:..." string, or a fallback if decoding fails.
+fn fingerprint_from_base64(key_b64: &str) -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    match base64::engine::general_purpose::STANDARD.decode(key_b64) {
+        Ok(key_bytes) => {
+            let hash = Sha256::digest(&key_bytes);
+            let b64 = base64_encode_nopad(&hash);
+            format!("SHA256:{b64}")
+        }
+        Err(_) => "(unable to compute fingerprint)".to_string(),
+    }
+}
+
 /// Get the key type string from a public key
 pub fn key_type_str(key: &PublicKey) -> String {
     match key.key_data() {
@@ -162,6 +178,7 @@ pub fn verify_host_key(host: &str, port: u16, key: &PublicKey) -> Result<HostKey
 
     // Check all entries that match this host
     let mut found_host = false;
+    let mut different_type_entry: Option<&KnownHostEntry> = None;
 
     for entry in &db.entries {
         if !entry_matches_host(entry, host, port) {
@@ -176,28 +193,40 @@ pub fn verify_host_key(host: &str, port: u16, key: &PublicKey) -> Result<HostKey
                 return Ok(HostKeyStatus::Trusted);
             } else {
                 // KEY CHANGED — potential MITM
+                let old_fp = fingerprint_from_base64(&entry.key_data);
                 return Ok(HostKeyStatus::Changed {
-                    old_fingerprint: "(stored in known_hosts)".to_string(),
+                    old_fingerprint: old_fp,
                     new_fingerprint: incoming_fp,
                     key_type: incoming_type,
+                    old_key_type: None,
                 });
             }
+        } else {
+            // Host matched but with a different key type — remember it
+            different_type_entry = Some(entry);
         }
     }
 
-    if found_host {
-        // Host exists but with different key type — treat as changed
+    if let Some(entry) = different_type_entry {
+        // Host exists but with different key type — generally benign (algorithm upgrade)
+        let old_fp = fingerprint_from_base64(&entry.key_data);
         Ok(HostKeyStatus::Changed {
-            old_fingerprint: "(different key type in known_hosts)".to_string(),
+            old_fingerprint: old_fp,
             new_fingerprint: incoming_fp,
             key_type: incoming_type,
+            old_key_type: Some(entry.key_type.clone()),
         })
-    } else {
+    } else if !found_host {
         // Unknown host
         Ok(HostKeyStatus::Unknown {
             fingerprint: incoming_fp,
             key_type: incoming_type,
         })
+    } else {
+        // Host was found with a matching key type — already returned early
+        // inside the loop (Trusted or Changed). This branch is logically
+        // unreachable, but Rust cannot prove it statically.
+        Ok(HostKeyStatus::Trusted)
     }
 }
 

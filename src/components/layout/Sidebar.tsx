@@ -1,10 +1,25 @@
 // components/layout/Sidebar.tsx — Left sidebar with profiles and active sessions
 //
-// Redesigned: search, collapsible sections, profile cards with nested sessions,
-// quick-access active sessions section, empty states.
+// Premium minimalist redesign with drag-and-drop reordering via @dnd-kit.
 
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { save, open } from "@tauri-apps/plugin-dialog";
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+  useSortable,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { useProfileStore } from "../../stores/profileStore";
 import {
   useSessionStore,
@@ -12,6 +27,7 @@ import {
 } from "../../stores/sessionStore";
 import { useI18n } from "../../lib/i18n";
 import { Dialog } from "../ui/Dialog";
+import type { ConnectionProfile } from "../../lib/types";
 
 // ─── Props (UNCHANGED — matches AppLayout contract) ───────
 interface SidebarProps {
@@ -52,6 +68,174 @@ function ChevronIcon({ collapsed }: { collapsed: boolean }) {
   );
 }
 
+// ─── Sortable Profile Card ───────────────────────────────
+
+interface SortableProfileCardProps {
+  profile: ConnectionProfile;
+  connected: boolean;
+  connecting: boolean;
+  hasActiveSessions: boolean;
+  profileSessions?: SessionEntry[];
+  activeSessionId: string | null;
+  statusClass: string;
+  onProfileClick: (id: string) => void;
+  onConnect: (id: string) => void;
+  onEditProfile: (id: string) => void;
+  onDeleteClick: (id: string, name: string) => void;
+  onSetActiveSession: (id: string) => void;
+  onDisconnect: (id: string) => void;
+  t: (key: TranslationKey, params?: Record<string, unknown>) => string;
+  connectingLabel: string;
+  connectLabel: string;
+}
+
+function SortableProfileCard({
+  profile: p,
+  connected,
+  connecting,
+  hasActiveSessions,
+  profileSessions,
+  activeSessionId,
+  statusClass,
+  onProfileClick,
+  onConnect,
+  onEditProfile,
+  onDeleteClick,
+  onSetActiveSession,
+  onDisconnect,
+  t,
+  connectingLabel,
+  connectLabel,
+}: SortableProfileCardProps) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: p.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : undefined,
+    zIndex: isDragging ? 10 : undefined,
+  };
+
+  return (
+    <div ref={setNodeRef} style={style}>
+      {/* Profile card */}
+      <div
+        className={`sidebar-profile-card ${connected ? "sidebar-profile-card-connected" : ""}`}
+        onClick={() => onProfileClick(p.id)}
+        title={`${p.username}@${p.host}:${p.port}`}
+      >
+        {/* Drag handle */}
+        <div
+          className="sidebar-drag-handle"
+          {...attributes}
+          {...listeners}
+        >
+          <span className="sidebar-drag-dots" />
+        </div>
+
+        <div className="sidebar-profile-card-left">
+          <span className={`sidebar-status-dot ${statusClass}`} />
+          <div className="sidebar-profile-text">
+            <div className="sidebar-profile-name">{p.name}</div>
+            <div className="sidebar-profile-host">
+              {p.username}@{p.host}:{p.port}
+            </div>
+          </div>
+        </div>
+        <div
+          className="sidebar-profile-card-actions"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {!connected && (
+            <button
+              className="sidebar-profile-btn sidebar-profile-btn-connect"
+              onClick={() => onConnect(p.id)}
+              disabled={connecting}
+              title={connecting ? connectingLabel : connectLabel}
+            >
+              {connecting ? (
+                <span className="sidebar-btn-spinner" />
+              ) : (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                  <polygon points="5,3 19,12 5,21" />
+                </svg>
+              )}
+            </button>
+          )}
+          <button
+            className="sidebar-profile-btn"
+            onClick={() => onEditProfile(p.id)}
+            title={t("sidebar.edit")}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+            </svg>
+          </button>
+          <button
+            className="sidebar-profile-btn sidebar-profile-btn-delete"
+            onClick={() => onDeleteClick(p.id, p.name)}
+            title={t("sidebar.delete")}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      {/* Nested sessions under profile */}
+      {hasActiveSessions && profileSessions && (
+        <div className="sidebar-nested-sessions">
+          {profileSessions
+            .filter(
+              (s) =>
+                s.state === "connected" ||
+                s.state === "connecting" ||
+                s.state === "authenticating"
+            )
+            .map((s) => (
+              <div
+                key={s.id}
+                className={`sidebar-nested-session ${s.id === activeSessionId ? "sidebar-nested-session-active" : ""}`}
+                onClick={() => onSetActiveSession(s.id)}
+              >
+                <div className="sidebar-nested-session-left">
+                  <SessionStateIndicator state={s.state} />
+                  <div className="sidebar-nested-session-info">
+                    <div className="sidebar-nested-session-host">
+                      {s.host}
+                    </div>
+                    <div className="sidebar-nested-session-state">
+                      {t(getSessionStateKey(s.state))}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  className="sidebar-nested-disconnect-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDisconnect(s.id);
+                  }}
+                  title={t("sidebar.disconnect")}
+                >
+                  {"\u23FB"}
+                </button>
+              </div>
+            ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Component ────────────────────────────────────────────
 
 export function Sidebar({
@@ -69,6 +253,7 @@ export function Sidebar({
     loading,
     loadProfiles,
     deleteProfile,
+    reorderProfiles,
     exportProfiles,
     importProfiles,
   } = useProfileStore();
@@ -102,6 +287,16 @@ export function Sidebar({
   const [importPassword, setImportPassword] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
   const [importLoading, setImportLoading] = useState(false);
+
+  // DnD sensors
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 5 },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
 
   useEffect(() => {
     void loadProfiles();
@@ -270,6 +465,47 @@ export function Sidebar({
     [sessionEntries]
   );
 
+  // DnD handler
+  const handleDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const { active, over } = event;
+      if (!over || active.id === over.id) return;
+
+      const oldIndex = filteredProfiles.findIndex((p) => p.id === active.id);
+      const newIndex = filteredProfiles.findIndex((p) => p.id === over.id);
+      if (oldIndex === -1 || newIndex === -1) return;
+
+      // Build new order from the full profiles list
+      const newProfiles = [...profiles];
+      const activeProfile = newProfiles.find((p) => p.id === active.id);
+      if (!activeProfile) return;
+
+      // Remove the dragged profile and insert at new position
+      const filteredIds = filteredProfiles.map((p) => p.id);
+      const newFilteredIds = [...filteredIds];
+      newFilteredIds.splice(oldIndex, 1);
+      newFilteredIds.splice(newIndex, 0, active.id as string);
+
+      // If search is active, only reorder within filtered results
+      // but maintain positions of non-filtered profiles
+      if (searchQuery.trim()) {
+        const fullIds = newProfiles.map((p) => p.id);
+        // Replace filtered IDs in their original positions
+        let filterIdx = 0;
+        const reorderedIds = fullIds.map((id) => {
+          if (filteredIds.includes(id)) {
+            return newFilteredIds[filterIdx++];
+          }
+          return id;
+        });
+        void reorderProfiles(reorderedIds);
+      } else {
+        void reorderProfiles(newFilteredIds);
+      }
+    },
+    [filteredProfiles, profiles, searchQuery, reorderProfiles]
+  );
+
   function handleDeleteClick(profileId: string, profileName: string) {
     const profileSessions = profileSessionMap.get(profileId);
     const hasActive =
@@ -358,7 +594,10 @@ export function Sidebar({
       {/* ── Search ── */}
       <div className="sidebar-search">
         <div className="sidebar-search-wrapper">
-          <span className="sidebar-search-icon">{"\u2315"}</span>
+          <svg className="sidebar-search-icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
           <input
             className="sidebar-search-input"
             type="text"
@@ -395,7 +634,11 @@ export function Sidebar({
               }}
               title={t("sidebar.import")}
             >
-              {"\u2193"}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
             </button>
             <button
               className="sidebar-action-btn sidebar-action-btn-subtle"
@@ -405,7 +648,11 @@ export function Sidebar({
               }}
               title={t("sidebar.export")}
             >
-              {"\u2191"}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
             </button>
             <button
               className="sidebar-action-btn"
@@ -415,7 +662,10 @@ export function Sidebar({
               }}
               title={t("sidebar.newProfile")}
             >
-              +
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
             </button>
           </div>
         </div>
@@ -442,108 +692,49 @@ export function Sidebar({
               <div className="sidebar-empty-state">{t("sidebar.noResults")}</div>
             )}
 
-            {/* Profile cards */}
-            {filteredProfiles.map((p) => {
-              const connected = isProfileConnected(p.id);
-              const connecting = isProfileConnecting(p.id);
-              const profileSessions = profileSessionMap.get(p.id);
-              const hasActiveSessions =
-                profileSessions?.some(
-                  (s) => s.state === "connected" || s.state === "connecting" || s.state === "authenticating"
-                ) ?? false;
+            {/* Profile cards with drag-and-drop */}
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragEnd={handleDragEnd}
+            >
+              <SortableContext
+                items={filteredProfiles.map((p) => p.id)}
+                strategy={verticalListSortingStrategy}
+              >
+                {filteredProfiles.map((p) => {
+                  const connected = isProfileConnected(p.id);
+                  const connecting = isProfileConnecting(p.id);
+                  const profileSessions = profileSessionMap.get(p.id);
+                  const hasActiveSessions =
+                    profileSessions?.some(
+                      (s) => s.state === "connected" || s.state === "connecting" || s.state === "authenticating"
+                    ) ?? false;
 
-              return (
-                <div key={p.id}>
-                  {/* Profile card */}
-                  <div
-                    className={`sidebar-profile-card ${connected ? "sidebar-profile-card-connected" : ""}`}
-                    onClick={() => handleProfileClick(p.id)}
-                    title={`${p.username}@${p.host}:${p.port}`}
-                  >
-                    <div className="sidebar-profile-card-left">
-                      <span className={`sidebar-status-dot ${getProfileStatusClass(p.id)}`} />
-                      <div className="sidebar-profile-text">
-                        <div className="sidebar-profile-name">{p.name}</div>
-                        <div className="sidebar-profile-host">
-                          {p.username}@{p.host}
-                        </div>
-                      </div>
-                    </div>
-                    <div
-                      className="sidebar-profile-card-actions"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      {!connected && (
-                        <button
-                          className="sidebar-profile-btn sidebar-profile-btn-connect"
-                          onClick={() => onConnect(p.id)}
-                          disabled={connecting}
-                          title={connecting ? t("sidebar.connecting") : t("sidebar.connect")}
-                        >
-                          {connecting ? "..." : "\u25B6"}
-                        </button>
-                      )}
-                      <button
-                        className="sidebar-profile-btn"
-                        onClick={() => onEditProfile(p.id)}
-                        title={t("sidebar.edit")}
-                      >
-                        {"\u270F"}
-                      </button>
-                      <button
-                        className="sidebar-profile-btn"
-                        onClick={() => handleDeleteClick(p.id, p.name)}
-                        title={t("sidebar.delete")}
-                      >
-                        {"\u2715"}
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* D4: Nested sessions under profile */}
-                  {hasActiveSessions && profileSessions && (
-                    <div className="sidebar-nested-sessions">
-                      {profileSessions
-                        .filter(
-                          (s) =>
-                            s.state === "connected" ||
-                            s.state === "connecting" ||
-                            s.state === "authenticating"
-                        )
-                        .map((s) => (
-                          <div
-                            key={s.id}
-                            className={`sidebar-nested-session ${s.id === activeSessionId ? "sidebar-nested-session-active" : ""}`}
-                            onClick={() => setActiveSession(s.id)}
-                          >
-                            <div className="sidebar-nested-session-left">
-                              <SessionStateIndicator state={s.state} />
-                              <div className="sidebar-nested-session-info">
-                                <div className="sidebar-nested-session-host">
-                                  {s.host}
-                                </div>
-                                <div className="sidebar-nested-session-state">
-                                  {t(getSessionStateKey(s.state))}
-                                </div>
-                              </div>
-                            </div>
-                            <button
-                              className="sidebar-nested-disconnect-btn"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onDisconnect(s.id);
-                              }}
-                    title={t("sidebar.disconnect")}
-                  >
-                    {"\u23FB"}
-                  </button>
-                          </div>
-                        ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+                  return (
+                    <SortableProfileCard
+                      key={p.id}
+                      profile={p}
+                      connected={connected}
+                      connecting={connecting}
+                      hasActiveSessions={hasActiveSessions}
+                      profileSessions={profileSessions}
+                      activeSessionId={activeSessionId}
+                      statusClass={getProfileStatusClass(p.id)}
+                      onProfileClick={handleProfileClick}
+                      onConnect={onConnect}
+                      onEditProfile={onEditProfile}
+                      onDeleteClick={handleDeleteClick}
+                      onSetActiveSession={setActiveSession}
+                      onDisconnect={onDisconnect}
+                      t={t}
+                      connectingLabel={t("sidebar.connecting")}
+                      connectLabel={t("sidebar.connect")}
+                    />
+                  );
+                })}
+              </SortableContext>
+            </DndContext>
           </div>
         </div>
 
@@ -615,8 +806,6 @@ export function Sidebar({
           </div>
         </div>
       )}
-
-      {/* D5: No active sessions — section hidden (activeSessions.length === 0 hides it above) */}
 
       {/* ── Delete Confirmation Dialog ── */}
       <Dialog

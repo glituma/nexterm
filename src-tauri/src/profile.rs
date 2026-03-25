@@ -25,6 +25,8 @@ pub struct ConnectionProfile {
     pub auth_method: AuthMethodConfig,
     pub startup_directory: Option<String>,
     pub tunnels: Vec<TunnelConfig>,
+    #[serde(default)]
+    pub display_order: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -60,6 +62,7 @@ impl Default for ConnectionProfile {
             auth_method: AuthMethodConfig::Password,
             startup_directory: None,
             tunnels: Vec::new(),
+            display_order: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -114,7 +117,8 @@ pub fn load_profiles_from_disk(
     let contents = std::fs::read_to_string(&path)
         .map_err(|e| AppError::ProfileError(format!("Failed to read profiles file: {e}")))?;
 
-    let profiles: Vec<ConnectionProfile> = serde_json::from_str(&contents)?;
+    let mut profiles: Vec<ConnectionProfile> = serde_json::from_str(&contents)?;
+    profiles.sort_by_key(|p| p.display_order);
     Ok(profiles)
 }
 
@@ -171,6 +175,7 @@ mod tests {
             auth_method: AuthMethodConfig::Password,
             startup_directory: None,
             tunnels: vec![],
+            display_order: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

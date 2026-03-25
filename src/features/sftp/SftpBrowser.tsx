@@ -5,6 +5,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { homeDir } from "@tauri-apps/api/path";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { save } from "@tauri-apps/plugin-dialog";
 import { FilePane, type SearchMode } from "./FilePane";
 import { TransferOverlay } from "./TransferOverlay";
@@ -15,6 +16,7 @@ import { Spinner } from "../../components/ui/Spinner";
 import { Dialog } from "../../components/ui/Dialog";
 import { Button } from "../../components/ui/Button";
 import { useI18n } from "../../lib/i18n";
+import { tauriInvoke } from "../../lib/tauri";
 import type { SessionId, FileEntry, FileContent, SearchResult, TransferEvent } from "../../lib/types";
 import type { PaneSource, FileAction } from "./sftp.types";
 
@@ -98,6 +100,14 @@ export function SftpBrowser({ sessionId }: SftpBrowserProps) {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
 
+  // ─── OS Drag & Drop state (PR2) ──────────────────────
+  const [isDraggingFromOS, setIsDraggingFromOS] = useState(false);
+  const remotePaneRef = useRef<HTMLDivElement>(null);
+
+  // Active pane tracking (PR3 — focus management)
+  const [activePane, setActivePane] = useState<PaneSource>("local");
+  const localPaneRef = useRef<HTMLDivElement>(null);
+
   // Resizable split
   const [splitPosition, setSplitPosition] = useState(50); // percentage
   const containerRef = useRef<HTMLDivElement>(null);
@@ -124,6 +134,147 @@ export function SftpBrowser({ sessionId }: SftpBrowserProps) {
       }
     }
   }, [sftp.sftpInitialized, sftp.remoteHome, sftp.remotePane.path, sftp.localPane.path, sftp.listRemoteDir, sftp.listLocalDir]);
+
+  // ─── OS Drag & Drop via Tauri (PR2) ────────────────────
+
+  /**
+   * Check if a physical position falls within the remote pane bounds.
+   * Returns true if the drop should target the remote pane.
+   */
+  const isOverRemotePane = useCallback((x: number, y: number): boolean => {
+    if (!remotePaneRef.current) return false;
+    const rect = remotePaneRef.current.getBoundingClientRect();
+    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  }, []);
+
+  /**
+   * Handle OS file drop on the remote pane: upload each file with per-file
+   * error handling so one failure doesn't block the rest.
+   */
+  const handleOSDrop = useCallback(
+    async (paths: string[], x: number, y: number) => {
+      if (!isOverRemotePane(x, y)) return;
+      if (!sftp.remotePane.path) return;
+
+      for (const localPath of paths) {
+        const fileName = localPath.split(/[/\\]/).pop() ?? localPath;
+        const remoteDest = sftp.remotePane.path + "/" + fileName;
+        try {
+          await sftp.uploadFile(localPath, remoteDest);
+        } catch (err) {
+          // Per-file error handling: log and continue with the rest.
+          // The transfer store's failTransfer will show the error in TransferOverlay.
+          console.error(`OS DnD upload failed for ${fileName}:`, err);
+        }
+      }
+    },
+    [sftp, isOverRemotePane],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (cancelled) return;
+        const { payload } = event;
+        switch (payload.type) {
+          case "enter":
+          case "over":
+            setIsDraggingFromOS(true);
+            break;
+          case "drop":
+            setIsDraggingFromOS(false);
+            void handleOSDrop(payload.paths, payload.position.x, payload.position.y);
+            break;
+          case "leave":
+            setIsDraggingFromOS(false);
+            break;
+        }
+      })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [handleOSDrop]);
+
+  // ─── Global Keyboard Shortcuts (PR3) ───────────────────
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Ignore when typing in inputs
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement
+      ) {
+        return;
+      }
+
+      // Alt+Left → Back
+      if (e.altKey && e.key === "ArrowLeft") {
+        e.preventDefault();
+        if (activePane === "remote") {
+          sftp.goRemoteBack();
+        } else {
+          sftp.goLocalBack();
+        }
+        return;
+      }
+
+      // Alt+Right → Forward
+      if (e.altKey && e.key === "ArrowRight") {
+        e.preventDefault();
+        if (activePane === "remote") {
+          sftp.goRemoteForward();
+        } else {
+          sftp.goLocalForward();
+        }
+        return;
+      }
+
+      // Alt+Up → Parent directory
+      if (e.altKey && e.key === "ArrowUp") {
+        e.preventDefault();
+        if (activePane === "remote") {
+          sftp.navigateRemoteUp();
+        } else {
+          sftp.navigateLocalUp();
+        }
+        return;
+      }
+
+      // Tab to switch panes (when not in an input)
+      if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        // Don't intercept Tab globally — let natural tab order work
+        // unless the active element is the pane itself
+        const paneEl = activePane === "local" ? localPaneRef.current : remotePaneRef.current;
+        if (paneEl && paneEl.contains(e.target as Node)) {
+          // If focus is on the pane container, tab switches to other pane
+          const isOnPane = e.target === paneEl || (e.target as HTMLElement).classList?.contains("sftp-pane");
+          if (isOnPane) {
+            e.preventDefault();
+            setActivePane(activePane === "local" ? "remote" : "local");
+            const otherPane = activePane === "local" ? remotePaneRef.current : localPaneRef.current;
+            // Focus the pane container within the other pane-container
+            const otherPaneFocusable = otherPane?.querySelector<HTMLElement>(".sftp-pane");
+            otherPaneFocusable?.focus();
+          }
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [activePane, sftp]);
 
   // ─── Split Resize ─────────────────────────────────────
 
@@ -462,6 +613,57 @@ export function SftpBrowser({ sessionId }: SftpBrowserProps) {
     [sftp, contextMenu, closeContextMenu],
   );
 
+  // ─── Local File Actions ───────────────────────────────
+  // Local pane files should open with the OS native app, NOT via SFTP.
+
+  const handleLocalFileAction = useCallback(
+    async (action: FileAction) => {
+      closeContextMenu();
+
+      switch (action.type) {
+        case "open": {
+          if (!action.entry) return;
+          const entry = action.entry;
+          // Local files: open with OS default application
+          if (entry.fileType === "file" || (entry.fileType === "symlink" && entry.linkTarget === "file")) {
+            try {
+              await tauriInvoke<void>("open_local_file", { path: entry.path });
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              setTooLargeMessage(message);
+              tooLargeTimerRef.current = setTimeout(() => {
+                setTooLargeMessage(null);
+                tooLargeTimerRef.current = null;
+              }, 4000);
+            }
+          }
+          break;
+        }
+        case "upload": {
+          if (!action.entry) return;
+          const remoteDest = sftp.remotePane.path + "/" + action.entry.name;
+          void sftp.uploadFile(action.entry.path, remoteDest);
+          break;
+        }
+        case "copyPath": {
+          if (action.entry) {
+            void navigator.clipboard.writeText(action.entry.path);
+          }
+          break;
+        }
+        case "refresh": {
+          sftp.refreshLocal();
+          break;
+        }
+        default:
+          // For any other actions on the local pane, delegate to the general handler
+          void handleFileAction(action);
+          break;
+      }
+    },
+    [sftp, closeContextMenu, handleFileAction],
+  );
+
   // ─── Dialog Actions ───────────────────────────────────
 
   const handleNewFolder = useCallback(async () => {
@@ -751,7 +953,7 @@ export function SftpBrowser({ sessionId }: SftpBrowserProps) {
 
       {/* Dual pane container */}
       <div className="sftp-panes" ref={containerRef}>
-        <div className="sftp-pane-container" style={{ width: `${splitPosition}%` }}>
+        <div className="sftp-pane-container" style={{ width: `${splitPosition}%` }} ref={localPaneRef}>
           <FilePane
             source="local"
             path={sftp.localPane.path}
@@ -764,16 +966,27 @@ export function SftpBrowser({ sessionId }: SftpBrowserProps) {
             onContextMenu={handleLocalContextMenu}
             selectedEntries={localSelected}
             onSelectionChange={setLocalSelected}
-            onFileAction={handleFileAction}
+            onFileAction={handleLocalFileAction}
             onDragStart={() => {}}
             onDrop={handleLocalDrop}
+            canGoBack={sftp.localPane.historyIndex > 0}
+            canGoForward={sftp.localPane.historyIndex < sftp.localPane.history.length - 1}
+            onGoBack={sftp.goLocalBack}
+            onGoForward={sftp.goLocalForward}
+            onGoHome={sftp.goLocalHome}
+            isFocused={activePane === "local"}
+            onPaneFocus={() => setActivePane("local")}
           />
         </div>
 
         {/* Resize handle */}
         <div className="sftp-split-handle" onMouseDown={handleSplitMouseDown} />
 
-        <div className="sftp-pane-container" style={{ width: `${100 - splitPosition}%` }}>
+        <div
+          className="sftp-pane-container"
+          style={{ width: `${100 - splitPosition}%`, position: "relative" }}
+          ref={remotePaneRef}
+        >
           <FilePane
             source="remote"
             path={sftp.remotePane.path}
@@ -789,6 +1002,11 @@ export function SftpBrowser({ sessionId }: SftpBrowserProps) {
             onFileAction={handleFileAction}
             onDragStart={() => {}}
             onDrop={handleRemoteDrop}
+            canGoBack={sftp.remotePane.historyIndex > 0}
+            canGoForward={sftp.remotePane.historyIndex < sftp.remotePane.history.length - 1}
+            onGoBack={sftp.goRemoteBack}
+            onGoForward={sftp.goRemoteForward}
+            onGoHome={sftp.goRemoteHome}
             searchMode={searchMode}
             searchQuery={searchQuery}
             searchResults={searchResults}
@@ -797,7 +1015,32 @@ export function SftpBrowser({ sessionId }: SftpBrowserProps) {
             onSearchModeChange={handleSearchModeChange}
             onSearchSubmit={handleSearchSubmit}
             onSearchClear={handleSearchClear}
+            isFocused={activePane === "remote"}
+            onPaneFocus={() => setActivePane("remote")}
           />
+
+          {/* OS Drag & Drop overlay (PR2) */}
+          {isDraggingFromOS && (
+            <div className="sftp-drop-overlay">
+              <div className="sftp-drop-overlay-content">
+                <svg
+                  width="32"
+                  height="32"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="17 8 12 3 7 8" />
+                  <line x1="12" y1="3" x2="12" y2="15" />
+                </svg>
+                <span>{t("sftp.dropToUpload")}</span>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -811,7 +1054,7 @@ export function SftpBrowser({ sessionId }: SftpBrowserProps) {
           y={contextMenu.y}
           entry={contextMenu.entry}
           source={contextMenu.source}
-          onAction={handleFileAction}
+          onAction={contextMenu.source === "local" ? handleLocalFileAction : handleFileAction}
           onClose={closeContextMenu}
         />
       )}

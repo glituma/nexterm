@@ -29,6 +29,14 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
+        .setup(|app| {
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
+            #[cfg(desktop)]
+            app.handle().plugin(tauri_plugin_process::init())?;
+            Ok(())
+        })
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             // Profile CRUD
@@ -38,6 +46,7 @@ pub fn run() {
             commands::profile::get_profile,
             commands::profile::export_profiles,
             commands::profile::import_profiles,
+            commands::profile::reorder_profiles,
             // Vault
             commands::vault::vault_status,
             commands::vault::vault_create,
@@ -75,6 +84,7 @@ pub fn run() {
             commands::sftp::sftp_open_external,
             commands::sftp::sftp_save_and_reveal,
             commands::sftp::list_local_dir,
+            commands::sftp::open_local_file,
             // Tunnel
             commands::tunnel::create_tunnel,
             commands::tunnel::start_tunnel,
