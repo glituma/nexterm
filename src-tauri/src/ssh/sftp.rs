@@ -517,7 +517,7 @@ pub async fn search_files(
             }
 
             // Enqueue subdirectories for further traversal
-            if entry.file_type == FileType::Directory && depth + 1 <= max_depth {
+            if entry.file_type == FileType::Directory && depth < max_depth {
                 queue.push_back((entry.path.clone(), depth + 1));
             }
         }
@@ -547,12 +547,12 @@ pub async fn upload(
     // Open local file
     let mut local_file = tokio::fs::File::open(local_path)
         .await
-        .map_err(|e| AppError::Io(e))?;
+        .map_err(AppError::Io)?;
 
     // Get file size
     let metadata = tokio::fs::metadata(local_path)
         .await
-        .map_err(|e| AppError::Io(e))?;
+        .map_err(AppError::Io)?;
     let total_bytes = metadata.len();
 
     let file_name = local_path
@@ -685,7 +685,7 @@ pub async fn download(
     // Create local file (create or truncate)
     let mut local_file = tokio::fs::File::create(local_path)
         .await
-        .map_err(|e| AppError::Io(e))?;
+        .map_err(AppError::Io)?;
 
     let mut bytes_transferred: u64 = 0;
     let mut buf = vec![0u8; TRANSFER_CHUNK_SIZE];
@@ -707,14 +707,14 @@ pub async fn download(
                 match result {
                     Ok(0) => {
                         // EOF — download complete
-                        local_file.flush().await.map_err(|e| AppError::Io(e))?;
+                        local_file.flush().await.map_err(AppError::Io)?;
 
                         let _ = on_progress.send(TransferEvent::Completed { transfer_id });
                         return Ok(transfer_id);
                     }
                     Ok(n) => {
                         // Write chunk to local file
-                        local_file.write_all(&buf[..n]).await.map_err(|e| AppError::Io(e))?;
+                        local_file.write_all(&buf[..n]).await.map_err(AppError::Io)?;
 
                         bytes_transferred += n as u64;
 

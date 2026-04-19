@@ -97,7 +97,7 @@ pub async fn sftp_close(
 
     if let Some(sftp_handle) = handle.sftp.take() {
         // Cancel all active transfers
-        for (_, transfer) in &sftp_handle.active_transfers {
+        for transfer in sftp_handle.active_transfers.values() {
             transfer.cancel_token.cancel();
         }
         // Close the SFTP session
