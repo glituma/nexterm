@@ -85,73 +85,144 @@ cargo clippy -- -D warnings      →  Finished (0 errors) — all clippy issues 
 
 ---
 
+## Batch 3 (Phase 5 + Phase 6 — Integration + Unlock Migration)
+
+**Date**: 2026-04-19
+**Model**: anthropic/claude-sonnet-4-6
+**Mode**: Strict TDD ✅ EXECUTED — full `cargo test` run at every RED/GREEN gate
+
+### Safety Net (before batch 3)
+
+```
+cargo test  →  test result: FAILED. 60 passed; 1 failed (pre-existing: ssh::keys::tests::list_keys_handles_missing_ssh_dir)
+```
+
+The pre-existing failure was NOT introduced by any previous batch and was NOT fixed (out of scope).
+
+### Tasks Completed (Batch 3)
+
+| P-number | Description | Status |
+|----------|-------------|--------|
+| P5.1 | [RED] `vault_save_to_disk_produces_owner_only_dacl` + 2 companion tests — first-ever vault test module | ✅ Done |
+| P5.2 | [GREEN] Replace `save_to_disk()` write+rename+`#[cfg(unix)]` block with `crate::fs_secure::secure_write` | ✅ Done |
+| P5.3 | [RED] `save_profiles_to_disk_produces_owner_only_dacl` + 2 companion tests | ✅ Done |
+| P5.4 | [GREEN] Replace `save_profiles_to_disk()` write+rename+`#[cfg(unix)]` block with `crate::fs_secure::secure_write` | ✅ Done |
+| P5.5 | [RED] `legacy_migration_backup_is_best_effort_hardened` + `legacy_migration_backup_exists_after_migration` | ✅ Done |
+| P5.6 | [GREEN] Add `best_effort_harden(&backup_path)` after `fs::copy` in `load_profiles_from_disk` migration branch | ✅ Done |
+| P6.1 | [RED] `harden_existing_credential_files_hardens_vault_and_profiles` + `_skips_nonexistent_files` — extracted testable helper from `vault_unlock` coupling | ✅ Done |
+| P6.2 | [GREEN] Call `crate::vault::harden_existing_credential_files(&data_dir)` from `vault_unlock` after `*vault_guard = Some(vault)` | ✅ Done |
+
+**Batch 3 total**: 8/8 tasks complete. **Cumulative: 45/55 tasks (P0–P6 done)**.
+
+### RED Gate Evidence (Batch 3)
+
+| Task | RED failure message | Type |
+|------|--------------------|----- |
+| P5.1 | `assertion: left (6) == right (1) failed: vault.json DACL must have exactly 1 ACE` | Assert |
+| P5.3 | `assertion: left (6) == right (1) failed: profiles.json DACL must have exactly 1 ACE` | Assert |
+| P5.5 | `assertion: left (6) == right (1) failed: profiles.backup.json DACL must have exactly 1 ACE` | Assert |
+| P6.1 | Compile error — `harden_existing_credential_files` did not exist when test was written | Compile |
+
+### Final Verification (Batch 3)
+
+```
+cargo check                        →  0 errors, 0 warnings (dead_code removed — callers now wired)
+cargo test                         →  test result: FAILED. 70 passed; 1 failed (same pre-existing)
+cargo clippy --target-dir target/clippy -- -D warnings  →  Finished (0 errors, 0 warnings)
+rg "#[cfg((unix|windows))]" vault.rs profile.rs → only test-module cfg blocks; ZERO production permission cfg
+```
+
+**10 new tests added** (vs 60 baseline) — no regressions.
+
+### Spec R7 Verification (Batch 3)
+
+```
+$ rg -n "#\[cfg\((unix|windows)\)\]" src-tauri/src/vault.rs src-tauri/src/profile.rs
+src-tauri/src/profile.rs:415:    #[cfg(windows)]  ← inside #[cfg(test)] mod tests
+src-tauri/src/profile.rs:442:    #[cfg(unix)]     ← inside #[cfg(test)] mod tests
+src-tauri/src/profile.rs:511:    #[cfg(windows)]  ← inside #[cfg(test)] mod tests
+src-tauri/src/vault.rs:418:    #[cfg(windows)]    ← inside #[cfg(test)] mod tests
+src-tauri/src/vault.rs:464:    #[cfg(windows)]    ← inside #[cfg(test)] mod tests
+src-tauri/src/vault.rs:489:    #[cfg(unix)]       ← inside #[cfg(test)] mod tests
+```
+
+**R7 SATISFIED** ✅ — All remaining `#[cfg]` in vault.rs and profile.rs are EXCLUSIVELY inside `#[cfg(test)] mod tests {}` blocks. Zero permission-related `#[cfg]` in production code paths.
+
+---
+
 ## Deviations from Design
 
-### D1: GENERIC_ALL → FILE_ALL_ACCESS mapping (Win32 behavior)
-**Deviation**: The design says `grfAccessPermissions = GENERIC_ALL`. The implementation sets this in `EXPLICIT_ACCESS_W` as specified. However, when `SetNamedSecurityInfoW` stores the ACE in the file-object DACL, Windows applies the file generic mapping and stores `FILE_ALL_ACCESS (0x001F01FF)` instead of `GENERIC_ALL (0x10000000)`.
+### D1: GENERIC_ALL → FILE_ALL_ACCESS mapping (Win32 behavior) [Batch 2]
+**Deviation**: Tests accept `FILE_ALL_ACCESS (0x001F01FF)` as the stored access mask because Windows maps `GENERIC_ALL` via the file generic mapping when storing in a DACL.
+**Resolution**: Production code correct; tests accept both values.
 
-**Resolution**: Production code is correct (uses `GENERIC_ALL` in `EXPLICIT_ACCESS_W` as designed). Test P4.3 was updated to accept both values with a comment explaining the Win32 generic-mapping behavior. The security effect is identical — the owner has full access.
+### D2: `HandleGuard` uses `Option<HANDLE>` [Batch 2]
+**Resolution**: More robust; `Drop` checks `Some` before `CloseHandle`.
 
-### D2: `HandleGuard` uses `Option<HANDLE>` (not raw `HANDLE`)
-**Deviation**: Design sketch shows a `HandleGuard(HANDLE)`. Implementation uses `HandleGuard(Option<HANDLE>)` to safely represent "not yet initialized" state.
+### D3: `LocalAllocGuard` wraps `*mut c_void` (not generic) [Batch 2]
+**Resolution**: Functionally equivalent for all use cases in this module.
 
-**Resolution**: More robust than the sketch. The `Drop` impl checks `Some` before calling `CloseHandle`.
+### D4: Test seam for `best_effort_harden` [Batch 2]
+**Resolution**: `#[cfg(test)]` function `best_effort_harden_with_result_for_test`; does not affect production code.
 
-### D3: `LocalAllocGuard` wraps `*mut c_void` (not generic `*mut T`)
-**Deviation**: Design mentions `LocalAllocGuard<T>`. Implementation uses a single `LocalAllocGuard(*mut c_void)` to avoid generic complexity.
+### D5: `is_unsupported` uses `matches!` macro [Batch 2]
+**Resolution**: Cleaner; equivalent behavior.
 
-**Resolution**: Functionally equivalent. The guard is used only for ACL and security-descriptor pointers, both of which are freed the same way (`LocalFree`).
+### D6: Pre-existing clippy fixes in sftp.rs [Batch 2]
+**Resolution**: Fixed as bonus (mechanical, no logic change).
 
-### D4: Test seam for `best_effort_harden` — `with_result_for_test` function
-**Deviation**: Design mentions a "test seam" without specifying the exact form. We chose to add a `#[cfg(test)]` function `best_effort_harden_with_result_for_test(io::Result<()>) -> BestEffortOutcome` to the public API.
+### D7: Cross-module DACL test helper refactored [Batch 3]
+**Deviation**: The original `read_dacl`, `current_user_sid`, `sids_equal` helpers were inside `#[cfg(test)] mod tests {}` in `windows.rs`. For vault.rs and profile.rs tests to access them, they needed to be at the **module level** (still under `#[cfg(test)]`) rather than inside the nested test submodule.
 
-**Resolution**: The seam is `#[cfg(test)]`-only and doesn't affect production code. Simpler than function pointer injection.
+**Resolution**: Moved to module-level `#[cfg(test)]` items (`pub(crate)`). Added `assert_owner_only_acl_for_test` as a high-level helper. Re-exported via `mod.rs::assert_owner_only_acl_for_test`. Old `tests` submodule helper functions renamed (`current_user_sid` → `current_user_sid_for_test`). The `windows::tests` module now uses the module-level helpers.
 
-### D5: is_unsupported uses `matches!` macro (from batch 1 refactor)
-The batch 1 implementation used `match e.raw_os_error() { Some(1) | Some(50) => true, _ => false }`. This was refactored to `matches!(e.raw_os_error(), Some(1) | Some(50))` in batch 2 to silence a potential clippy lint.
+### D8: `harden_existing_credential_files` extracted to `vault.rs` [Batch 3]
+**Deviation**: Design says inject loop directly in `vault_unlock`. Since `vault_unlock` has a Tauri `AppHandle` dependency, testing it directly requires a full Tauri test harness. Instead, extracted `pub(crate) fn harden_existing_credential_files(data_dir: &Path)` to `vault.rs` and tested it there.
+**Resolution**: The function is tested independently; `vault_unlock` calls it as a one-liner. Testing is full coverage of the actual logic.
 
-### D6: Pre-existing clippy issues in sftp.rs fixed
-**Deviation**: `cargo clippy -D warnings` failed on pre-existing lints in `src/ssh/sftp.rs` and `src/commands/sftp.rs` (int_plus_one, for_kv_map, redundant_closure). These were not introduced by batch 2.
+### D9: P6.1 RED was a compile error, not an assertion failure [Batch 3]
+**Deviation**: P6.1 RED — the test referenced `harden_existing_credential_files` before the function existed, causing a compile error (the canonical Rust RED). The function and its test were written in the same task step. Both immediately passed.
+**Resolution**: Compile error IS a valid RED gate in Rust TDD. The behavioral assertions in the test cover the full spec scenario.
 
-**Resolution**: Fixed as a bonus cleanup to make clippy pass cleanly. Changes were mechanical and safe (no logic change). Files affected: `src/ssh/sftp.rs`, `src/commands/sftp.rs`.
+### D10: `#![allow(dead_code)]` removed from mod.rs and windows.rs [Batch 3]
+After batch 3 wired all callers, the `#![allow(dead_code)]` in `mod.rs` and `windows.rs` were removed. A targeted `#[allow(dead_code)]` on `BestEffortOutcome::Failed(io::Error)` field was added because Phase 7 (export flow) hasn't wired the inner error consumer yet.
 
 ---
 
-## TDD Cycle Evidence (Batch 2)
+## TDD Cycle Evidence (Batch 3)
 
-| Task | Test Name | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
+| Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
 |------|-----------|-------|------------|-----|-------|-------------|----------|
-| P4.1 + P4.2 | `test_helper_assert_owner_only_acl_can_read_dacl` | Unit (Windows) | ✅ 4/4 | ✅ Written | ✅ Passed | ➖ Smoke test | ✅ Clean |
-| P4.3 | `windows_secure_write_produces_single_ace` | Unit (Windows) | ✅ | ✅ Written | ✅ Passed (after D1 fix) | ✅ P4.4, P4.5 extend | ✅ Clean |
-| P4.4 | `windows_secure_write_no_well_known_sids` | Unit (Windows) | ✅ | ✅ Written | ✅ Passed | ✅ 3 SIDs checked | ✅ Clean |
-| P4.5 | `windows_secure_write_protected_dacl_set` | Unit (Windows) | ✅ | ✅ Written | ✅ Passed | ➖ Boolean check | ✅ Clean |
-| P4.6–P4.9 | (impl tasks — no separate test) | — | — | — | ✅ Exercised via P4.3–P4.5 | — | ✅ SAFETY: comments added |
-| P4.10 + P4.11 | `windows_rename_preserves_dacl` | Unit (Windows) | ✅ | ✅ Written | ✅ Passed (no extra code) | ✅ Before + after rename | ✅ Clean |
-| P4.12 + P4.13 | `is_unsupported_returns_true_for_unsupported_errors` | Unit | ✅ | ✅ Written | ✅ Passed | ✅ 4 cases: Unsupported, 1, 50, 5 | ✅ `matches!` macro |
-| P4.14 | `best_effort_harden_returns_skipped_unsupported_for_os_error_50` + `_for_error_kind_unsupported` | Unit | ✅ | ✅ Written | ✅ Passed | ✅ 2 cases | ✅ Clean |
-| P4.15 | `best_effort_harden_returns_failed_on_nonexistent_path` | Unit (Windows) | ✅ | ✅ Written | ✅ Passed | ➖ Real OS error path | ✅ Clean |
-| P4.16 | `best_effort_harden_returns_hardened_on_success` | Unit (Windows) | ✅ | ✅ Written | ✅ Passed | ➖ Real NTFS path | ✅ Clean |
+| P5.1 | `vault.rs::tests` | Unit (Windows) | ✅ 60 passing | ✅ Written (6 ACEs → 1 expected) | ✅ Passed after P5.2 | ✅ +2 companion tests (content, no-tmp) | ✅ helper extracted |
+| P5.2 | (GREEN impl) | — | ✅ | N/A | ✅ 3/3 green | — | ✅ Dead #[cfg(unix)] block removed |
+| P5.3 | `profile.rs::tests` | Unit (Windows) | ✅ | ✅ Written (6 ACEs → 1 expected) | ✅ Passed after P5.4 | ✅ +2 companion tests | ✅ Clean |
+| P5.4 | (GREEN impl) | — | ✅ | N/A | ✅ 3/3 green | — | ✅ Dead #[cfg(unix)] block removed |
+| P5.5 | `profile.rs::tests` | Unit (Windows) | ✅ | ✅ Written (6 ACEs → 1) | ✅ Passed after P5.6 | ✅ +1 existence-only companion | ✅ Clean |
+| P5.6 | (GREEN impl) | — | ✅ | N/A | ✅ 2/2 green | — | ✅ Clean |
+| P6.1 | `vault.rs::tests` | Unit (Windows) | ✅ | ✅ Compile error (fn missing) | ✅ Passed immediately | ✅ +1 no-op companion test | ✅ Clean |
+| P6.2 | (GREEN impl) | — | ✅ | N/A | ✅ dead_code warning gone; 70/70 green | — | ✅ Clean |
 
-### Test Summary (Batch 2)
-- **Total tests written in batch 2**: 10 test functions (all Windows-gated except `is_unsupported_*`)
-- **Total tests passing**: 14 (4 from batch 1 + 10 new)
-- **Layers used**: Unit (14)
-- **Pure functions**: `is_unsupported`, `get_current_user_sid`, `build_explicit_access`
-- **RAII guards**: `HandleGuard` (CloseHandle), `LocalAllocGuard` (LocalFree)
-- **SAFETY: comments**: 10 unsafe blocks, each with explicit invariant documentation
+### Test Summary (Batch 3)
+- **New tests written**: 10
+- **Total tests passing**: 70 (baseline 60 + 10 new)
+- **Pre-existing failure**: 1 (`ssh::keys::tests::list_keys_handles_missing_ssh_dir`) — unchanged, not mine
+- **Layers used**: Unit (10)
+- **Pure functions**: `harden_existing_credential_files`
+- **No `unwrap`/`expect`/`panic!` in production paths**
 
 ---
 
-## Files Created / Modified (Batch 2)
+## Files Created / Modified (Batch 3)
 
 | File | Action | Description |
 |------|--------|-------------|
-| `src-tauri/src/fs_secure/windows.rs` | **Replaced** | Full Win32 DACL implementation: `get_current_user_sid`, `build_explicit_access`, `harden`, `HandleGuard`, `LocalAllocGuard`, + 10 Windows tests in `#[cfg(test)] mod tests` |
-| `src-tauri/src/fs_secure/mod.rs` | Modified | Added `#![allow(dead_code)]` (batch 1 dead_code suppression), `is_unsupported_pub_for_test`, `best_effort_harden_with_result_for_test`; refactored `is_unsupported` to use `matches!` macro |
-| `src-tauri/src/ssh/sftp.rs` | Modified | Fixed pre-existing clippy: `depth + 1 <= max_depth` → `depth < max_depth`, `|e| AppError::Io(e)` → `AppError::Io` (×4) |
-| `src-tauri/src/commands/sftp.rs` | Modified | Fixed pre-existing clippy: `for (_, x) in map` → `for x in map.values()` |
-| `openspec/changes/windows-vault-acl-hardening/tasks.md` | Modified | Marked P4.1–P4.17 as `[x]` |
-| `openspec/changes/windows-vault-acl-hardening/apply-progress.md` | Updated | This file (merged batch 1 + batch 2) |
+| `src-tauri/src/fs_secure/windows.rs` | **Rewrote** | Moved `read_dacl`, `AceInfo`, `current_user_sid_for_test`, `sids_equal`, `assert_owner_only_acl_for_test` to module-level `#[cfg(test)]`; kept `tests` submodule for named test functions; removed file-level `#![allow(dead_code)]` |
+| `src-tauri/src/fs_secure/mod.rs` | Modified | Added `assert_owner_only_acl_for_test` re-export (Windows+test only); removed `#![allow(dead_code)]`; added `#[allow(dead_code)]` on `BestEffortOutcome::Failed` field |
+| `src-tauri/src/vault.rs` | Modified | Added `harden_existing_credential_files(data_dir)` helper; replaced `save_to_disk` write+rename+`#[cfg(unix)]` with `crate::fs_secure::secure_write`; added first-ever `#[cfg(test)] mod tests` with 5 test functions |
+| `src-tauri/src/profile.rs` | Modified | Replaced `save_profiles_to_disk` write+rename+`#[cfg(unix)]` with `crate::fs_secure::secure_write`; added `best_effort_harden` after `fs::copy` in migration; added 5 new test functions to existing `tests` module |
+| `src-tauri/src/commands/vault.rs` | Modified | `vault_unlock` now calls `crate::vault::harden_existing_credential_files(&data_dir)` after unlock |
+| `openspec/changes/windows-vault-acl-hardening/tasks.md` | Modified | Marked P5.1–P5.6, P6.1–P6.2 as `[x]` |
+| `openspec/changes/windows-vault-acl-hardening/apply-progress.md` | Updated | This file (merged batch 1 + 2 + 3) |
 
 ---
 
@@ -169,18 +240,19 @@ The batch 1 implementation used `match e.raw_os_error() { Some(1) | Some(50) => 
 Error check pattern: `if err.0 != 0 { return Err(io::Error::from_raw_os_error(err.0 as i32)); }`
 
 ### GENERIC_ALL → FILE_ALL_ACCESS mapping
-When `GENERIC_ALL` is stored in a file-object DACL via `SetNamedSecurityInfoW`, Windows maps it to `FILE_ALL_ACCESS (0x001F01FF)` using the object's generic mapping. The DACL stores the mapped value. Tests must accept `FILE_ALL_ACCESS` as the stored access mask.
+When `GENERIC_ALL` is stored in a file-object DACL via `SetNamedSecurityInfoW`, Windows maps it to `FILE_ALL_ACCESS (0x001F01FF)` using the object's generic mapping. Tests must accept `FILE_ALL_ACCESS` as the stored access mask.
+
+### Cross-module test helpers in Rust
+To share test helpers across `windows.rs` and `vault.rs`/`profile.rs`, helpers must be placed at **module level** under `#[cfg(test)]` (not inside `mod tests {}`), then re-exported from `mod.rs` under `#[cfg(all(test, windows))]`.
 
 ---
 
 ## Next Batch Starts At
 
-**P5.1** — `vault_save_to_disk_produces_owner_only_dacl` test in `vault.rs`
+**P7.1** — Extend `ExportResult` struct with `warnings: Vec<String>`
 
-### Remaining Work
+### Remaining Work (10/55 tasks)
 
-- [ ] P5.1 through P5.6 — Integration with `vault.rs` and `profile.rs`
-- [ ] P6.1 through P6.2 — Migration on Vault Unlock
-- [ ] P7.1 through P7.5 — Export Flow + Frontend Notification
-- [ ] P8.1 — Documentation
+- [ ] P7.1 through P7.5 — Export Flow + Frontend Notification (Rust + TypeScript + React)
+- [ ] P8.1 — `docs/security.md` documentation
 - [ ] P9.1 through P9.5 — Clean-Up and Verification Gates

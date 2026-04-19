@@ -73,19 +73,19 @@
 
 ## Phase 5 — Integration with `vault.rs` and `profile.rs` (TDD)
 
-- [ ] P5.1 — **[RED]** Write failing test `#[cfg(windows)]` in `vault.rs` test module (create it — first ever): `vault_save_to_disk_produces_owner_only_dacl` — creates a `TempDir`, initializes a vault at that path, calls `save_to_disk()`, calls `assert_owner_only_acl(vault.json)`.
-- [ ] P5.2 — **[GREEN]** Refactor `vault.rs::save_to_disk()` (lines 321–337): replace `fs::write + rename + #[cfg(unix)]` block with a single call to `crate::fs_secure::secure_write(&path, &json_bytes)`.
-- [ ] P5.3 — **[RED]** Write failing test `#[cfg(windows)]` in `profile.rs` test module: `save_profiles_to_disk_produces_owner_only_dacl` — creates `TempDir`, writes profiles, calls `assert_owner_only_acl(profiles.json)`.
-- [ ] P5.4 — **[GREEN]** Refactor `profile.rs::save_profiles_to_disk()` (lines 237–251): replace `fs::write + rename + #[cfg(unix)]` block with `crate::fs_secure::secure_write(&path, &json_bytes)`.
-- [ ] P5.5 — **[RED]** Write failing test: `legacy_migration_backup_is_best_effort_hardened` — simulate legacy migration path; assert `profiles.backup.json` exists after migration AND on Windows `assert_owner_only_acl` passes (on other platforms just assert the file exists).
-- [ ] P5.6 — **[GREEN]** Update `profile.rs` legacy migration path (~line 206): after `fs::copy(old_path, backup_path)`, call `crate::fs_secure::best_effort_harden(&backup_path)`; match outcome to log appropriately; outcome is never propagated as error.
+- [x] P5.1 — **[RED]** Write failing test `#[cfg(windows)]` in `vault.rs` test module (create it — first ever): `vault_save_to_disk_produces_owner_only_dacl` — creates a `TempDir`, initializes a vault at that path, calls `save_to_disk()`, calls `assert_owner_only_acl(vault.json)`. ✅ CONFIRMED RED: 6 ACEs vs 1 expected.
+- [x] P5.2 — **[GREEN]** Refactor `vault.rs::save_to_disk()` (lines 321–337): replace `fs::write + rename + #[cfg(unix)]` block with a single call to `crate::fs_secure::secure_write(&path, &json_bytes)`. ✅ GREEN: 3/3 tests passing.
+- [x] P5.3 — **[RED]** Write failing test `#[cfg(windows)]` in `profile.rs` test module: `save_profiles_to_disk_produces_owner_only_dacl` — creates `TempDir`, writes profiles, calls `assert_owner_only_acl(profiles.json)`. ✅ CONFIRMED RED: 6 ACEs vs 1 expected.
+- [x] P5.4 — **[GREEN]** Refactor `profile.rs::save_profiles_to_disk()` (lines 237–251): replace `fs::write + rename + #[cfg(unix)]` block with `crate::fs_secure::secure_write(&path, &json_bytes)`. ✅ GREEN: 3/3 tests passing.
+- [x] P5.5 — **[RED]** Write failing test: `legacy_migration_backup_is_best_effort_hardened` — simulate legacy migration path; assert `profiles.backup.json` exists after migration AND on Windows `assert_owner_only_acl` passes (on other platforms just assert the file exists). ✅ CONFIRMED RED: 6 ACEs vs 1 expected.
+- [x] P5.6 — **[GREEN]** Update `profile.rs` legacy migration path (~line 206): after `fs::copy(old_path, backup_path)`, call `crate::fs_secure::best_effort_harden(&backup_path)`; match outcome to log appropriately; outcome is never propagated as error. ✅ GREEN: 2/2 tests passing.
 
 ---
 
 ## Phase 6 — Migration on Vault Unlock (TDD)
 
-- [ ] P6.1 — **[RED]** Write failing test `#[cfg(windows)]`: `vault_unlock_re_hardens_existing_files` — set up a `TempDir` with pre-existing `vault.json` and `profiles.json` written without ACL hardening; call the migration helper directly or through `vault_unlock`; assert both files have owner-only DACLs after the call.
-- [ ] P6.2 — **[GREEN]** Modify `commands/vault.rs::vault_unlock`: after `*vault_guard = Some(vault);`, iterate `["vault.json", "profiles.json"]`, call `crate::fs_secure::best_effort_harden(&data_dir.join(filename))` for each if the file exists; log `debug!` on `SkippedUnsupported`, `warn!` on `Failed`, ignore `Hardened`.
+- [x] P6.1 — **[RED]** Write failing test `#[cfg(windows)]`: `vault_unlock_re_hardens_existing_files` — set up a `TempDir` with pre-existing `vault.json` and `profiles.json` written without ACL hardening; call the migration helper directly or through `vault_unlock`; assert both files have owner-only DACLs after the call. ✅ Extracted `harden_existing_credential_files(data_dir)` helper; tested directly (RED = compile error before helper existed).
+- [x] P6.2 — **[GREEN]** Modify `commands/vault.rs::vault_unlock`: after `*vault_guard = Some(vault);`, calls `crate::vault::harden_existing_credential_files(&data_dir)`. ✅ GREEN: dead_code warning gone; no regressions.
 
 ---
 

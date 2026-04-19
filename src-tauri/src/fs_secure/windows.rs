@@ -6,10 +6,7 @@
 // All Win32 unsafe code is isolated here. Zero #[cfg(windows)] leaks outside
 // this module.
 //
-// Dead-code lint suppressed: the public `harden` fn and helpers are called via
-// `mod.rs::harden_impl`. Phase 5+ callers wire the module; until then the
-// functions appear unused to the dead-code checker.
-#![allow(dead_code)]
+// The `harden` fn is called via `mod.rs::harden_impl` on Windows builds.
 
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -290,6 +287,152 @@ pub(crate) fn harden(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+// ─── Windows test helpers (module-level, #[cfg(test)]) ───────────────────────
+//
+// Placed outside the `tests` submodule so they can be re-exported by mod.rs
+// for use in vault.rs / profile.rs tests that need DACL verification without
+// duplicating the complex Win32 ACE-enumeration code.
+
+/// One Access Control Entry from the DACL.
+///
+/// Only compiled in test builds.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct AceInfo {
+    /// Raw access mask (e.g. `GENERIC_ALL.0 = 0x10000000`)
+    pub(crate) access_mask: u32,
+    /// SID bytes copied from the ACE.
+    pub(crate) sid_bytes: Vec<u8>,
+}
+
+/// Read the DACL of `path` and return all ACEs plus the DACL-protected flag.
+///
+/// Panics on any Win32 error — test-only helper, never called in production.
+#[cfg(test)]
+pub(crate) fn read_dacl(path: &Path) -> (Vec<AceInfo>, bool) {
+    use windows::Win32::Security::{
+        GetAce, GetSecurityDescriptorControl, PSECURITY_DESCRIPTOR,
+    };
+    use windows::Win32::Security::Authorization::GetNamedSecurityInfoW;
+
+    let mut wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0u16))
+        .collect();
+
+    let mut sd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR::default();
+    let mut dacl_ptr: *mut ACL = std::ptr::null_mut();
+
+    // SAFETY: Wide path is null-terminated and valid for the duration of
+    // the call. `GetNamedSecurityInfoW` allocates the security descriptor
+    // via `LocalAlloc`; we wrap it in `LocalAllocGuard` immediately.
+    let err = unsafe {
+        GetNamedSecurityInfoW(
+            PWSTR(wide.as_mut_ptr()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(&mut dacl_ptr),
+            None,
+            &mut sd,
+        )
+    };
+    assert_eq!(err.0, 0, "GetNamedSecurityInfoW failed with error {}", err.0);
+    // Wrap so the security descriptor is freed when this function returns.
+    let _sd_guard = LocalAllocGuard(sd.0 as *mut std::ffi::c_void);
+
+    // Check SE_DACL_PROTECTED control bit.
+    let mut control: u16 = 0;
+    let mut revision: u32 = 0;
+    // SAFETY: `sd` is a valid security descriptor returned above.
+    unsafe {
+        GetSecurityDescriptorControl(sd, &mut control, &mut revision)
+            .expect("GetSecurityDescriptorControl should succeed");
+    }
+    let dacl_protected = (control & windows::Win32::Security::SE_DACL_PROTECTED.0) != 0;
+
+    // Enumerate ACEs.
+    let mut aces: Vec<AceInfo> = Vec::new();
+    if dacl_ptr.is_null() {
+        return (aces, dacl_protected);
+    }
+
+    // SAFETY: `dacl_ptr` points into the security descriptor buffer owned
+    // by `_sd_guard`. Both are live for the rest of this function.
+    let ace_count = unsafe { (*dacl_ptr).AceCount };
+
+    for i in 0..ace_count {
+        let mut ace_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        // SAFETY: `dacl_ptr` is valid. `GetAce` writes a pointer to the
+        // i-th ACE within the ACL memory — lifetime tied to `_sd_guard`.
+        unsafe {
+            GetAce(dacl_ptr, i as u32, &mut ace_ptr)
+                .expect("GetAce should succeed");
+        }
+
+        // An ACCESS_ALLOWED_ACE layout (bytes):
+        //   [0]  AceType  : u8
+        //   [1]  AceFlags : u8
+        //   [2..3] AceSize : u16
+        //   [4..7] AccessMask : u32
+        //   [8..]  SID : variable
+        // SAFETY: `ace_ptr` is a valid ACE inside the ACL buffer.
+        let ace_bytes = ace_ptr as *const u8;
+        let access_mask = unsafe { *(ace_bytes.add(4) as *const u32) };
+
+        // Compute SID length to copy the bytes.
+        // SAFETY: The SID starts at byte 8 of the ACE and is entirely
+        // within the ACL buffer owned by `_sd_guard`.
+        let psid = PSID(unsafe { ace_bytes.add(8) as *mut _ });
+        let sid_len = unsafe { GetLengthSid(psid) } as usize;
+        let sid_bytes = unsafe {
+            std::slice::from_raw_parts(ace_bytes.add(8), sid_len).to_vec()
+        };
+
+        aces.push(AceInfo { access_mask, sid_bytes });
+    }
+
+    (aces, dacl_protected)
+}
+
+/// Returns the current user's SID bytes. Test-only helper.
+#[cfg(test)]
+pub(crate) fn current_user_sid_for_test() -> Vec<u8> {
+    get_current_user_sid().expect("get_current_user_sid must succeed in tests")
+}
+
+/// Returns `true` if two SID byte slices represent the same SID. Test-only.
+#[cfg(test)]
+pub(crate) fn sids_equal(a: &[u8], b: &[u8]) -> bool {
+    use windows::Win32::Security::EqualSid;
+    // SAFETY: Both slices are valid SID buffers of the correct length as
+    // returned by `GetLengthSid`. `EqualSid` performs a byte-wise
+    // comparison of the SID structures.
+    unsafe {
+        let psid_a = PSID(a.as_ptr() as *mut _);
+        let psid_b = PSID(b.as_ptr() as *mut _);
+        EqualSid(psid_a, psid_b).is_ok()
+    }
+}
+
+/// Assert that the file at `path` has an owner-only DACL.
+///
+/// Returns `(ace_count, dacl_protected, all_aces_belong_to_current_user)`.
+///
+/// Re-exported from `mod.rs` as `fs_secure::assert_owner_only_acl_for_test`
+/// so vault.rs / profile.rs tests can call it without duplicating Win32 code.
+#[cfg(test)]
+pub(crate) fn assert_owner_only_acl_for_test(path: &Path) -> (usize, bool, bool) {
+    let (aces, protected) = read_dacl(path);
+    let owner_sid = current_user_sid_for_test();
+    let all_owner = aces
+        .iter()
+        .all(|ace| sids_equal(&ace.sid_bytes, &owner_sid));
+    (aces.len(), protected, all_owner)
+}
+
 // ─── Windows Tests ────────────────────────────────────────
 
 #[cfg(test)]
@@ -297,128 +440,9 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
     use windows::Win32::Security::{
-        CreateWellKnownSid, EqualSid, GetAce, GetSecurityDescriptorControl,
-        PSECURITY_DESCRIPTOR, WELL_KNOWN_SID_TYPE, WinAuthenticatedUserSid, WinBuiltinUsersSid,
+        CreateWellKnownSid, WELL_KNOWN_SID_TYPE, WinAuthenticatedUserSid, WinBuiltinUsersSid,
         WinWorldSid,
     };
-    use windows::Win32::Security::Authorization::GetNamedSecurityInfoW;
-
-    // ── Test helper: assert_owner_only_acl ───────────────
-    //
-    // Retrieves the DACL of `path`, enumerates ACEs, and returns them as
-    // `(aces, dacl_protected)`. Used by P4.3–P4.5 and P4.10 tests.
-
-    /// One Access Control Entry from the DACL.
-    #[derive(Debug)]
-    struct AceInfo {
-        /// Raw access mask (e.g. `GENERIC_ALL.0 = 0x10000000`)
-        access_mask: u32,
-        /// SID bytes copied from the ACE.
-        sid_bytes: Vec<u8>,
-    }
-
-    /// Read the DACL of `path` and return all ACEs plus the protection flag.
-    ///
-    /// Panics on any Win32 error (test context only — never in production).
-    fn read_dacl(path: &Path) -> (Vec<AceInfo>, bool) {
-        let mut wide: Vec<u16> = path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0u16))
-            .collect();
-
-        let mut sd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR::default();
-        let mut dacl_ptr: *mut ACL = std::ptr::null_mut();
-
-        // SAFETY: Wide path is null-terminated and valid for the duration of
-        // the call. `GetNamedSecurityInfoW` allocates the security descriptor
-        // via `LocalAlloc`; we wrap it in `LocalAllocGuard` immediately.
-        let err = unsafe {
-            GetNamedSecurityInfoW(
-                PWSTR(wide.as_mut_ptr()),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                None,
-                None,
-                Some(&mut dacl_ptr),
-                None,
-                &mut sd,
-            )
-        };
-        assert_eq!(err.0, 0, "GetNamedSecurityInfoW failed with error {}", err.0);
-        // Wrap so the security descriptor is freed when this function returns.
-        let _sd_guard = LocalAllocGuard(sd.0 as *mut std::ffi::c_void);
-
-        // Check SE_DACL_PROTECTED control bit.
-        let mut control: u16 = 0;
-        let mut revision: u32 = 0;
-        // SAFETY: `sd` is a valid security descriptor returned above.
-        unsafe {
-            GetSecurityDescriptorControl(sd, &mut control, &mut revision)
-                .expect("GetSecurityDescriptorControl should succeed");
-        }
-        let dacl_protected = (control & windows::Win32::Security::SE_DACL_PROTECTED.0) != 0;
-
-        // Enumerate ACEs.
-        let mut aces: Vec<AceInfo> = Vec::new();
-        if dacl_ptr.is_null() {
-            return (aces, dacl_protected);
-        }
-
-        // SAFETY: `dacl_ptr` points into the security descriptor buffer owned
-        // by `_sd_guard`. Both are live for the rest of this function.
-        let ace_count = unsafe { (*dacl_ptr).AceCount };
-
-        for i in 0..ace_count {
-            let mut ace_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-            // SAFETY: `dacl_ptr` is valid. `GetAce` writes a pointer to the
-            // i-th ACE within the ACL memory — lifetime tied to `_sd_guard`.
-            unsafe {
-                GetAce(dacl_ptr, i as u32, &mut ace_ptr)
-                    .expect("GetAce should succeed");
-            }
-
-            // An ACCESS_ALLOWED_ACE layout (bytes):
-            //   [0]  AceType  : u8
-            //   [1]  AceFlags : u8
-            //   [2..3] AceSize : u16
-            //   [4..7] AccessMask : u32
-            //   [8..]  SID : variable
-            // SAFETY: `ace_ptr` is a valid ACE inside the ACL buffer.
-            let ace_bytes = ace_ptr as *const u8;
-            let access_mask = unsafe { *(ace_bytes.add(4) as *const u32) };
-
-            // Compute SID length to copy the bytes.
-            // SAFETY: The SID starts at byte 8 of the ACE and is entirely
-            // within the ACL buffer owned by `_sd_guard`.
-            let psid = PSID(unsafe { ace_bytes.add(8) as *mut _ });
-            let sid_len = unsafe { GetLengthSid(psid) } as usize;
-            let sid_bytes = unsafe {
-                std::slice::from_raw_parts(ace_bytes.add(8), sid_len).to_vec()
-            };
-
-            aces.push(AceInfo { access_mask, sid_bytes });
-        }
-
-        (aces, dacl_protected)
-    }
-
-    /// Returns the current user's SID bytes.
-    fn current_user_sid() -> Vec<u8> {
-        get_current_user_sid().expect("get_current_user_sid must succeed in tests")
-    }
-
-    /// Returns `true` if two SID byte slices represent the same SID.
-    fn sids_equal(a: &[u8], b: &[u8]) -> bool {
-        // SAFETY: Both slices are valid SID buffers of the correct length as
-        // returned by `GetLengthSid`. `EqualSid` performs a byte-wise
-        // comparison of the SID structures.
-        unsafe {
-            let psid_a = PSID(a.as_ptr() as *mut _);
-            let psid_b = PSID(b.as_ptr() as *mut _);
-            EqualSid(psid_a, psid_b).is_ok()
-        }
-    }
 
     /// Create and return the bytes of a well-known SID.
     fn well_known_sid(kind: WELL_KNOWN_SID_TYPE) -> Vec<u8> {
@@ -486,7 +510,7 @@ mod tests {
             aces.len()
         );
 
-        let owner_sid = current_user_sid();
+        let owner_sid = current_user_sid_for_test();
         assert!(
             sids_equal(&aces[0].sid_bytes, &owner_sid),
             "The single ACE must belong to the current user SID"
@@ -577,7 +601,7 @@ mod tests {
         std::fs::rename(&tmp_path, &final_path).expect("rename");
 
         let (aces_after, protected_after) = read_dacl(&final_path);
-        let owner_sid = current_user_sid();
+        let owner_sid = current_user_sid_for_test();
 
         assert_eq!(
             aces_after.len(),

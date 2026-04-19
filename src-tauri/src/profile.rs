@@ -205,6 +205,11 @@ pub fn load_profiles_from_disk(
         if !backup_path.exists() {
             if let Err(e) = std::fs::copy(&path, &backup_path) {
                 tracing::warn!("Failed to create profiles backup: {e}");
+            } else {
+                // Best-effort: harden the backup file permissions.
+                // Migration must not fail on ACL issues — outcome is intentionally
+                // ignored here; the function itself logs at debug!/warn! level.
+                let _ = crate::fs_secure::best_effort_harden(&backup_path);
             }
         }
         // Re-save with migrated format
@@ -233,22 +238,11 @@ pub fn save_profiles_to_disk(
 
     let json = serde_json::to_string_pretty(profiles)?;
 
-    // Write to temp file then rename for atomicity
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &json)
+    // Atomic write with owner-only permission hardening (cross-platform).
+    // On Unix: sets mode 0o600. On Windows: sets owner-only DACL.
+    // The .tmp file is hardened BEFORE rename, closing the race window.
+    crate::fs_secure::secure_write(&path, json.as_bytes())
         .map_err(|e| AppError::ProfileError(format!("Failed to write profiles: {e}")))?;
-
-    std::fs::rename(&tmp_path, &path)
-        .map_err(|e| AppError::ProfileError(format!("Failed to finalize profiles write: {e}")))?;
-
-    // Restrict file permissions to owner-only on Unix (0o600)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(&path, perms)
-            .map_err(|e| AppError::ProfileError(format!("Failed to set file permissions: {e}")))?;
-    }
 
     Ok(())
 }
@@ -258,6 +252,7 @@ pub fn save_profiles_to_disk(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     /// Helper: create a profile with a single user (the common test case).
     fn test_profile(name: &str, host: &str, username: &str) -> ConnectionProfile {
@@ -368,6 +363,192 @@ mod tests {
     fn validation_accepts_valid_profile() {
         let profile = test_profile("Production", "prod.example.com", "deploy");
         assert!(profile.validate().is_ok());
+    }
+
+    // ── P5.3 RED — profiles save produces hardened file ────────────────────────
+    //
+    // After `save_profiles_to_disk`, the resulting profiles.json must:
+    //   - Exist at the expected path.
+    //   - Contain valid JSON.
+    //   - On Windows: have an owner-only DACL (exactly 1 ACE, protected, current user).
+    //   - On Unix: have mode 0o600.
+    //
+    // This test is the RED gate: it will FAIL until P5.4 replaces the old
+    // write+rename+#[cfg(unix)] block with `crate::fs_secure::secure_write`.
+
+    #[test]
+    fn save_profiles_to_disk_file_exists_with_valid_content() {
+        let dir = TempDir::new().expect("TempDir creation");
+        let profiles = vec![test_profile("Server A", "a.example.com", "admin")];
+
+        save_profiles_to_disk(&profiles, Some(&dir.path().to_path_buf())).unwrap();
+
+        let profiles_path = dir.path().join("profiles.json");
+        assert!(profiles_path.exists(), "profiles.json must exist after save");
+
+        let contents = std::fs::read_to_string(&profiles_path).expect("read profiles.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&contents).expect("profiles.json must be valid JSON");
+        assert!(parsed.is_array(), "profiles.json must be a JSON array");
+        assert_eq!(
+            parsed.as_array().unwrap().len(),
+            1,
+            "profiles.json must contain 1 profile"
+        );
+    }
+
+    #[test]
+    fn save_profiles_to_disk_no_tmp_file_remains() {
+        let dir = TempDir::new().expect("TempDir creation");
+        let profiles = vec![test_profile("Server A", "a.example.com", "admin")];
+
+        save_profiles_to_disk(&profiles, Some(&dir.path().to_path_buf())).unwrap();
+
+        let tmp_path = dir.path().join("profiles.json.tmp");
+        assert!(
+            !tmp_path.exists(),
+            "profiles.json.tmp must not remain after successful save"
+        );
+    }
+
+    /// P5.3 — On Windows, profiles.json must have an owner-only DACL after save.
+    #[cfg(windows)]
+    #[test]
+    fn save_profiles_to_disk_produces_owner_only_dacl() {
+        let dir = TempDir::new().expect("TempDir creation");
+        let profiles = vec![test_profile("Server A", "a.example.com", "admin")];
+
+        save_profiles_to_disk(&profiles, Some(&dir.path().to_path_buf())).unwrap();
+
+        let profiles_path = dir.path().join("profiles.json");
+        let (ace_count, dacl_protected, all_owner) =
+            crate::fs_secure::assert_owner_only_acl_for_test(&profiles_path);
+
+        assert_eq!(
+            ace_count, 1,
+            "profiles.json DACL must have exactly 1 ACE; got {ace_count}"
+        );
+        assert!(
+            dacl_protected,
+            "profiles.json DACL must have SE_DACL_PROTECTED set (no inherited ACEs)"
+        );
+        assert!(
+            all_owner,
+            "The single ACE must belong to the current user SID"
+        );
+    }
+
+    /// P5.3 triangulation — On Unix, profiles.json must have mode 0o600 after save.
+    #[cfg(unix)]
+    #[test]
+    fn save_profiles_to_disk_produces_0600_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().expect("TempDir creation");
+        let profiles = vec![test_profile("Server A", "a.example.com", "admin")];
+
+        save_profiles_to_disk(&profiles, Some(&dir.path().to_path_buf())).unwrap();
+
+        let profiles_path = dir.path().join("profiles.json");
+        let mode = std::fs::metadata(&profiles_path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "profiles.json must have mode 0o600 on Unix");
+    }
+
+    // ── P5.5 RED — legacy migration backup is best-effort hardened ─────────────
+    //
+    // When `load_profiles_from_disk` encounters a legacy format (top-level
+    // username/auth_method), it migrates the profiles AND creates a backup file
+    // `profiles.backup.json` via `fs::copy`.
+    //
+    // This test asserts:
+    //   1. The backup file exists after migration.
+    //   2. On Windows: it has an owner-only DACL.
+    //   3. On Unix: it has mode 0o600.
+    //
+    // The test is RED until P5.6 adds `best_effort_harden` after the `fs::copy`.
+
+    #[test]
+    fn legacy_migration_backup_exists_after_migration() {
+        let dir = TempDir::new().expect("TempDir creation");
+        let dir_path = dir.path().to_path_buf();
+
+        // Write a legacy-format profiles.json (top-level username/auth_method,
+        // no `users` array) — this triggers the migration path in load_profiles_from_disk.
+        let legacy_json = r#"[{
+            "id": "00000000-0000-0000-0000-000000000001",
+            "name": "Legacy Server",
+            "host": "legacy.example.com",
+            "port": 22,
+            "username": "root",
+            "authMethod": {"type": "password"},
+            "tunnels": [],
+            "displayOrder": 0,
+            "createdAt": "2024-01-01T00:00:00Z",
+            "updatedAt": "2024-01-01T00:00:00Z"
+        }]"#;
+        std::fs::write(dir.path().join("profiles.json"), legacy_json)
+            .expect("write legacy profiles.json");
+
+        // Run load — this triggers migration + backup creation.
+        let profiles = load_profiles_from_disk(Some(&dir_path))
+            .expect("load_profiles_from_disk must succeed");
+        assert_eq!(profiles.len(), 1, "migration should preserve 1 profile");
+
+        // Assert the backup file exists.
+        let backup_path = dir.path().join("profiles.backup.json");
+        assert!(
+            backup_path.exists(),
+            "profiles.backup.json must be created during migration"
+        );
+    }
+
+    /// P5.5 — On Windows, the legacy migration backup must have an owner-only DACL.
+    ///
+    /// RED gate: fails until P5.6 adds `best_effort_harden` after `fs::copy`.
+    #[cfg(windows)]
+    #[test]
+    fn legacy_migration_backup_is_best_effort_hardened() {
+        let dir = TempDir::new().expect("TempDir creation");
+        let dir_path = dir.path().to_path_buf();
+
+        let legacy_json = r#"[{
+            "id": "00000000-0000-0000-0000-000000000002",
+            "name": "Legacy Server 2",
+            "host": "legacy2.example.com",
+            "port": 22,
+            "username": "admin",
+            "authMethod": {"type": "password"},
+            "tunnels": [],
+            "displayOrder": 0,
+            "createdAt": "2024-01-01T00:00:00Z",
+            "updatedAt": "2024-01-01T00:00:00Z"
+        }]"#;
+        std::fs::write(dir.path().join("profiles.json"), legacy_json)
+            .expect("write legacy profiles.json");
+
+        load_profiles_from_disk(Some(&dir_path)).expect("load must succeed");
+
+        let backup_path = dir.path().join("profiles.backup.json");
+        assert!(backup_path.exists(), "backup must exist");
+
+        let (ace_count, dacl_protected, all_owner) =
+            crate::fs_secure::assert_owner_only_acl_for_test(&backup_path);
+
+        assert_eq!(
+            ace_count, 1,
+            "profiles.backup.json DACL must have exactly 1 ACE; got {ace_count}"
+        );
+        assert!(
+            dacl_protected,
+            "profiles.backup.json must have SE_DACL_PROTECTED set"
+        );
+        assert!(
+            all_owner,
+            "The single ACE must belong to the current user SID"
+        );
     }
 
     #[test]
