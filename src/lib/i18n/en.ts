@@ -28,6 +28,7 @@ export const en = {
   "sidebar.importShort": "Import",
   "sidebar.newProfileShort": "New",
   "sidebar.exportSuccess": "Exported {count} profiles",
+  "sidebar.exportSuccessWithAclWarning": "Exported {count} profiles. Warning: the file system did not accept owner-only permissions — the export file may be readable by other local users.",
   "sidebar.importSuccess": "Imported {imported} profiles ({skipped} skipped)",
   "sidebar.importError": "Failed to import profiles",
   "sidebar.noProfilesToExport": "No profiles to export",

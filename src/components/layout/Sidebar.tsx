@@ -429,13 +429,17 @@ export function Sidebar({
         setExportLoading(false);
         return;
       }
-      const count = await exportProfiles(
+      const result = await exportProfiles(
         path,
         exportIncludePasswords,
         exportIncludePasswords ? exportPassword : undefined,
       );
       setExportDialog(false);
-      setBanner({ type: "success", message: t("sidebar.exportSuccess", { count }) });
+      if (result.warnings.includes("acl_not_applied")) {
+        setBanner({ type: "success", message: t("sidebar.exportSuccessWithAclWarning", { count: result.count }) });
+      } else {
+        setBanner({ type: "success", message: t("sidebar.exportSuccess", { count: result.count }) });
+      }
     } catch (err) {
       setExportError(String(err));
     } finally {

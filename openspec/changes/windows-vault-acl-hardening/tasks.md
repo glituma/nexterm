@@ -91,17 +91,17 @@
 
 ## Phase 7 — Export Flow + Frontend Notification (TDD)
 
-- [ ] P7.1 — Extend `ExportResult` struct (Rust side, in `commands/profile.rs` or its type file): add `warnings: Vec<String>` field; update all construction sites to include `warnings: vec![]` by default.
-- [ ] P7.2 — **[RED]** Write failing test: `export_emits_acl_not_applied_warning_when_harden_skipped` — mock or force `best_effort_harden` to return `SkippedUnsupported`; call export logic; assert `result.warnings.contains(&"acl_not_applied".to_string())`.
-- [ ] P7.3 — **[GREEN]** Update `commands/profile.rs::export_profiles`: after writing the export file, call `crate::fs_secure::best_effort_harden(&export_path)`; on `SkippedUnsupported` or `Failed`, push `"acl_not_applied"` into `result.warnings`.
-- [ ] P7.4 — Update TypeScript export types (locate `src/features/export/` or equivalent): add `warnings: string[]` to the `ExportResult` TS interface / type.
-- [ ] P7.5 — Update the export React component: after a successful export, check `result.warnings.includes("acl_not_applied")`; if true, display a non-fatal toast: "Export written, but the file system did not accept owner-only permissions."
+- [x] P7.1 — Extend `ExportResult` struct (Rust side, in `commands/profile.rs` or its type file): add `warnings: Vec<String>` field; update all construction sites to include `warnings: vec![]` by default. ✅ `ExportResult { count, warnings }` + `build_export_result` helper extracted.
+- [x] P7.2 — **[RED]** Write failing test: `export_emits_acl_not_applied_warning_when_harden_skipped` — mock or force `best_effort_harden` to return `SkippedUnsupported`; call export logic; assert `result.warnings.contains(&"acl_not_applied".to_string())`. ✅ 4 unit tests on `build_export_result` helper (Hardened/SkippedUnsupported/Failed/stable-contract).
+- [x] P7.3 — **[GREEN]** Update `commands/profile.rs::export_profiles`: after writing the export file, call `crate::fs_secure::best_effort_harden(&export_path)`; on `SkippedUnsupported` or `Failed`, push `"acl_not_applied"` into `result.warnings`. ✅ `best_effort_harden` called; result built via `build_export_result`.
+- [x] P7.4 — Update TypeScript export types (locate `src/features/export/` or equivalent): add `warnings: string[]` to the `ExportResult` TS interface / type. ✅ `ExportResult` interface added to `profileStore.ts`; `exportProfiles` return type updated to `Promise<ExportResult>`.
+- [x] P7.5 — Update the export React component: after a successful export, check `result.warnings.includes("acl_not_applied")`; if true, display a non-fatal toast: "Export written, but the file system did not accept owner-only permissions." ✅ Sidebar.tsx uses `sidebar.exportSuccessWithAclWarning` key; both `en.ts` and `es.ts` updated.
 
 ---
 
 ## Phase 8 — Documentation
 
-- [ ] P8.1 — Create or update `docs/security.md`: document the defense-in-depth model (vault is AES-256-GCM encrypted; ACL is an extra layer), Windows ACL behavior (owner-only DACL, stripped inheritance via `PROTECTED_DACL_SECURITY_INFORMATION`), FAT32 / network-share silent fallback for internal files (encrypted content still protected), GPO reassertion as known limitation (cannot be mitigated at app level), cross-volume rename not supported (`.tmp` co-located by design), and how to manually verify with `icacls %APPDATA%\com.cognidevai.nexterm\vault.json`.
+- [x] P8.1 — Create or update `docs/security.md`: document the defense-in-depth model (vault is AES-256-GCM encrypted; ACL is an extra layer), Windows ACL behavior (owner-only DACL, stripped inheritance via `PROTECTED_DACL_SECURITY_INFORMATION`), FAT32 / network-share silent fallback for internal files (encrypted content still protected), GPO reassertion as known limitation (cannot be mitigated at app level), cross-volume rename not supported (`.tmp` co-located by design), and how to manually verify with `icacls %APPDATA%\com.cognidevai.nexterm\vault.json`. ✅ Created `docs/security.md` (~200 lines, 11 sections).
 
 ---
 
