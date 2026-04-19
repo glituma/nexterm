@@ -36,13 +36,30 @@ pub struct ExportResult {
 ///
 /// Centralises the "did hardening succeed?" → warning-string mapping so the
 /// logic can be unit-tested without touching the async Tauri command surface.
+///
+/// When hardening fails with an unexpected error, the inner `io::Error` is
+/// logged at `warn!` level with export-flow context (the generic
+/// `best_effort_harden` call site already logs, but this adds the "during
+/// export" framing so operators reading the logs know which write path the
+/// failure belongs to).
 pub(crate) fn build_export_result(
     count: u32,
     outcome: crate::fs_secure::BestEffortOutcome,
 ) -> ExportResult {
+    use crate::fs_secure::BestEffortOutcome;
     let mut warnings = Vec::new();
-    if !matches!(outcome, crate::fs_secure::BestEffortOutcome::Hardened) {
-        warnings.push("acl_not_applied".to_string());
+    match outcome {
+        BestEffortOutcome::Hardened => {}
+        BestEffortOutcome::SkippedUnsupported => {
+            warnings.push("acl_not_applied".to_string());
+        }
+        BestEffortOutcome::Failed(err) => {
+            tracing::warn!(
+                error = %err,
+                "export file hardening failed; surfacing acl_not_applied warning to user"
+            );
+            warnings.push("acl_not_applied".to_string());
+        }
     }
     ExportResult { count, warnings }
 }
