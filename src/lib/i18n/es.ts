@@ -30,6 +30,7 @@ export const es: Record<TranslationKey, string> = {
   "sidebar.importShort": "Importar",
   "sidebar.newProfileShort": "Nuevo",
   "sidebar.exportSuccess": "{count} perfiles exportados",
+  "sidebar.exportSuccessWithAclWarning": "Se exportaron {count} perfiles. Advertencia: el sistema de archivos no aceptó permisos de solo-propietario, el archivo de exportación puede ser leído por otros usuarios locales.",
   "sidebar.importSuccess": "{imported} perfiles importados ({skipped} omitidos)",
   "sidebar.importError": "Error al importar perfiles",
   "sidebar.noProfilesToExport": "No hay perfiles para exportar",

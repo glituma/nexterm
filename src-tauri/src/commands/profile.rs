@@ -18,6 +18,35 @@ use crate::error::AppError;
 use crate::profile::{self, AuthMethodConfig, ConnectionProfile, UserCredential};
 use crate::state::{AppState, SessionState};
 
+// ─── Export/Import result types ─────────────────────────
+
+/// Result returned by `export_profiles` over the Tauri IPC bridge.
+///
+/// `count` is the number of profiles written. `warnings` carries zero or more
+/// stable string identifiers (NOT translation keys) that the frontend maps to
+/// localised messages. Currently defined warning: `"acl_not_applied"`.
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportResult {
+    pub count: u32,
+    pub warnings: Vec<String>,
+}
+
+/// Build an `ExportResult` from a profile count and a `BestEffortOutcome`.
+///
+/// Centralises the "did hardening succeed?" → warning-string mapping so the
+/// logic can be unit-tested without touching the async Tauri command surface.
+pub(crate) fn build_export_result(
+    count: u32,
+    outcome: crate::fs_secure::BestEffortOutcome,
+) -> ExportResult {
+    let mut warnings = Vec::new();
+    if !matches!(outcome, crate::fs_secure::BestEffortOutcome::Hardened) {
+        warnings.push("acl_not_applied".to_string());
+    }
+    ExportResult { count, warnings }
+}
+
 // ─── Helpers ────────────────────────────────────────────
 
 /// Get the app data dir from the Tauri app handle
@@ -262,7 +291,7 @@ pub async fn export_profiles(
     export_path: String,
     include_credentials: bool,
     export_password: Option<String>,
-) -> Result<u32, AppError> {
+) -> Result<ExportResult, AppError> {
     let profiles = state.profiles.lock().await;
 
     if profiles.is_empty() {
@@ -323,7 +352,11 @@ pub async fn export_profiles(
             .map_err(|e| AppError::ProfileError(format!("Failed to write export file: {e}")))?;
     }
 
-    Ok(count)
+    // Best-effort ACL hardening on the export file.
+    // The export path is user-chosen (may be FAT32, network share, etc.) so we
+    // never fail the export on a hardening error — we just surface a warning.
+    let harden_outcome = crate::fs_secure::best_effort_harden(std::path::Path::new(&export_path));
+    Ok(build_export_result(count, harden_outcome))
 }
 
 #[tauri::command]
@@ -583,4 +616,67 @@ fn decrypt_export_data(data: &[u8], password: &str) -> Result<Vec<u8>, AppError>
         .map_err(|_| AppError::ProfileError("Wrong export password or corrupted file".to_string()))?;
 
     Ok(plaintext)
+}
+
+// ─── Tests ───────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs_secure::BestEffortOutcome;
+    use std::io;
+
+    // ── P7.1 / P7.2 — ExportResult shape and warning mapping ────────────────
+    //
+    // Strategy: we cannot call the async Tauri command directly in a unit test
+    // (it requires AppState / Tauri internals). Instead we test the extracted
+    // `build_export_result` helper which encapsulates the warning-mapping
+    // seam. This covers R4 + R5 from the spec without Tauri ceremony.
+    //
+    // Deviation D11: command-level integration test (actual file + IPC round-trip)
+    // deferred to manual/E2E verification (Phase 9). The helper function test is
+    // the unit-level TDD gate.
+
+    #[test]
+    fn build_export_result_hardened_has_no_warnings() {
+        // [RED written first; GREEN: `build_export_result` returns empty warnings
+        //  when outcome is Hardened]
+        let result = build_export_result(3, BestEffortOutcome::Hardened);
+        assert_eq!(result.count, 3);
+        assert!(
+            result.warnings.is_empty(),
+            "no warnings expected when ACL hardening succeeded"
+        );
+    }
+
+    #[test]
+    fn build_export_result_skipped_unsupported_emits_acl_not_applied() {
+        // [RED: warns when SkippedUnsupported]
+        let result = build_export_result(5, BestEffortOutcome::SkippedUnsupported);
+        assert_eq!(result.count, 5);
+        assert!(
+            result.warnings.contains(&"acl_not_applied".to_string()),
+            "expected 'acl_not_applied' warning for SkippedUnsupported outcome"
+        );
+    }
+
+    #[test]
+    fn build_export_result_failed_emits_acl_not_applied() {
+        // [RED: warns when Failed]
+        let err = io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
+        let result = build_export_result(2, BestEffortOutcome::Failed(err));
+        assert_eq!(result.count, 2);
+        assert!(
+            result.warnings.contains(&"acl_not_applied".to_string()),
+            "expected 'acl_not_applied' warning for Failed outcome"
+        );
+    }
+
+    #[test]
+    fn export_result_warning_string_is_stable_contract() {
+        // Ensure the literal "acl_not_applied" string never changes accidentally.
+        // Frontend depends on this exact string for i18n mapping.
+        let result = build_export_result(1, BestEffortOutcome::SkippedUnsupported);
+        assert_eq!(result.warnings[0], "acl_not_applied");
+    }
 }

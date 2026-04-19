@@ -12,6 +12,15 @@ export interface ImportResult {
   errors: string[];
 }
 
+/// Result returned by the `export_profiles` Tauri command.
+/// `count` is the number of profiles written.
+/// `warnings` carries stable string identifiers (NOT translation keys) that the
+/// frontend maps to localised messages. Current values: `"acl_not_applied"`.
+export interface ExportResult {
+  count: number;
+  warnings: string[];
+}
+
 interface ProfileStoreState {
   profiles: ConnectionProfile[];
   loading: boolean;
@@ -22,7 +31,7 @@ interface ProfileStoreState {
   deleteProfile: (id: string) => Promise<void>;
   storeCredential: (profileId: string, userId: string, password: string) => Promise<void>;
   reorderProfiles: (ids: string[]) => Promise<void>;
-  exportProfiles: (exportPath: string, includeCredentials: boolean, exportPassword?: string) => Promise<number>;
+  exportProfiles: (exportPath: string, includeCredentials: boolean, exportPassword?: string) => Promise<ExportResult>;
   importProfiles: (importPath: string, importPassword?: string) => Promise<ImportResult>;
   clearError: () => void;
 }
@@ -114,7 +123,7 @@ export const useProfileStore = create<ProfileStoreState>((set) => ({
   exportProfiles: async (exportPath: string, includeCredentials: boolean, exportPassword?: string) => {
     set({ error: null });
     try {
-      return await tauriInvoke<number>("export_profiles", {
+      return await tauriInvoke<ExportResult>("export_profiles", {
         exportPath,
         includeCredentials,
         exportPassword: exportPassword ?? null,
