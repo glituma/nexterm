@@ -94,6 +94,11 @@ pub async fn vault_unlock(
     let mut vault_guard = state.vault.lock().await;
     *vault_guard = Some(vault);
 
+    // Re-apply owner-only ACL hardening to existing credential files.
+    // This upgrades files written by older versions (without ACL hardening)
+    // on the first unlock after update. Idempotent and best-effort.
+    crate::vault::harden_existing_credential_files(&data_dir);
+
     Ok(())
 }
 

@@ -311,31 +311,194 @@ impl Vault {
         let json = serde_json::to_string_pretty(&vault_file)
             .map_err(|e| AppError::VaultError(format!("Failed to serialize vault: {e}")))?;
 
-        // Ensure parent directory exists
-        if let Some(parent) = self.file_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                AppError::VaultError(format!("Failed to create vault directory: {e}"))
-            })?;
-        }
-
-        // Write to temp file then rename for atomicity
-        let tmp_path = self.file_path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, &json)
+        // Atomic write with owner-only permission hardening (cross-platform).
+        // On Unix: sets mode 0o600. On Windows: sets owner-only DACL.
+        // The .tmp file is hardened BEFORE rename, closing the race window.
+        crate::fs_secure::secure_write(&self.file_path, json.as_bytes())
             .map_err(|e| AppError::VaultError(format!("Failed to write vault: {e}")))?;
 
-        std::fs::rename(&tmp_path, &self.file_path)
-            .map_err(|e| AppError::VaultError(format!("Failed to finalize vault write: {e}")))?;
-
-        // Restrict file permissions to owner-only on Unix (0o600)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(&self.file_path, perms).map_err(|e| {
-                AppError::VaultError(format!("Failed to set vault file permissions: {e}"))
-            })?;
-        }
-
         Ok(())
+    }
+}
+
+// ─── Post-unlock migration helper ───────────────────────
+
+/// Re-apply owner-only permission hardening to existing credential files.
+///
+/// Called from `commands/vault.rs::vault_unlock` after a successful unlock
+/// to ensure files written by older app versions (without ACL hardening) get
+/// upgraded on first unlock.
+///
+/// This is idempotent and best-effort: files that don't exist are skipped,
+/// and ACL failures are not propagated (the function itself logs them).
+pub(crate) fn harden_existing_credential_files(data_dir: &std::path::Path) {
+    for filename in ["vault.json", "profiles.json"] {
+        let path = data_dir.join(filename);
+        if path.exists() {
+            let _ = crate::fs_secure::best_effort_harden(&path);
+        }
+    }
+}
+
+// ─── Tests ──────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Helper: create a vault in a temp directory.
+    ///
+    /// Uses a simple master password; the vault is fully functional for tests.
+    fn make_vault(dir: &TempDir) -> Vault {
+        Vault::create(dir.path(), "test-master-password")
+            .expect("Vault::create must succeed in a writable temp dir")
+    }
+
+    // ── P5.1 RED — vault save produces hardened file ─────
+    //
+    // Asserts that after `Vault::create` (which calls `save_to_disk` internally),
+    // the vault.json file:
+    //   - Exists at the expected path.
+    //   - Contains valid JSON (round-trip parseable).
+    //   - On Windows: has an owner-only DACL (exactly 1 ACE, protected, current user).
+    //   - On Unix: has mode 0o600.
+
+    #[test]
+    fn vault_save_to_disk_file_exists_with_valid_content() {
+        let dir = TempDir::new().expect("TempDir creation");
+        let _vault = make_vault(&dir);
+
+        let vault_path = dir.path().join("vault.json");
+        assert!(vault_path.exists(), "vault.json must exist after Vault::create");
+
+        let contents = std::fs::read_to_string(&vault_path).expect("read vault.json");
+        // Validate it's parseable JSON with expected fields.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&contents).expect("vault.json must be valid JSON");
+        assert_eq!(
+            parsed["version"],
+            serde_json::json!(1),
+            "vault.json must have version=1"
+        );
+        assert!(
+            parsed["salt"].is_string(),
+            "vault.json must have a string salt field"
+        );
+    }
+
+    #[test]
+    fn vault_save_to_disk_no_tmp_file_remains() {
+        let dir = TempDir::new().expect("TempDir creation");
+        let _vault = make_vault(&dir);
+
+        // The .tmp file must be gone after a successful save.
+        let tmp_path = dir.path().join("vault.json.tmp");
+        assert!(
+            !tmp_path.exists(),
+            "vault.json.tmp must not remain after Vault::create"
+        );
+    }
+
+    // ── P6.1 RED — vault_unlock re-hardens existing files ───────────────────────
+    //
+    // We extract the re-hardening logic into a testable helper
+    // `harden_existing_credential_files(data_dir)` and test it here.
+    //
+    // The test:
+    //   1. Creates vault.json and profiles.json using plain `std::fs::write`
+    //      (NOT hardened — they'll have default inherited ACLs).
+    //   2. Calls the helper.
+    //   3. On Windows: asserts both files now have an owner-only DACL.
+    //
+    // This test is RED until P6.2 implements `harden_existing_credential_files`.
+
+    /// P6.1 — On Windows, `harden_existing_credential_files` must harden both
+    /// vault.json and profiles.json.
+    #[cfg(windows)]
+    #[test]
+    fn harden_existing_credential_files_hardens_vault_and_profiles() {
+        let dir = TempDir::new().expect("TempDir creation");
+
+        // Write files with plain fs::write — NOT hardened (many ACEs from inheritance).
+        std::fs::write(dir.path().join("vault.json"), b"{}").expect("write vault.json");
+        std::fs::write(dir.path().join("profiles.json"), b"[]").expect("write profiles.json");
+
+        // Verify they start unhardened (sanity check that the test is meaningful).
+        let (ace_before, _, _) =
+            crate::fs_secure::assert_owner_only_acl_for_test(&dir.path().join("vault.json"));
+        assert_ne!(ace_before, 1, "vault.json should NOT be hardened before the call");
+
+        // Call the helper.
+        harden_existing_credential_files(dir.path());
+
+        // Assert vault.json is now hardened.
+        let (ace_count, dacl_protected, all_owner) =
+            crate::fs_secure::assert_owner_only_acl_for_test(&dir.path().join("vault.json"));
+        assert_eq!(ace_count, 1, "vault.json must have 1 ACE after harden; got {ace_count}");
+        assert!(dacl_protected, "vault.json must have SE_DACL_PROTECTED");
+        assert!(all_owner, "vault.json ACE must belong to the current user SID");
+
+        // Assert profiles.json is now hardened.
+        let (ace_count, dacl_protected, all_owner) =
+            crate::fs_secure::assert_owner_only_acl_for_test(&dir.path().join("profiles.json"));
+        assert_eq!(ace_count, 1, "profiles.json must have 1 ACE after harden; got {ace_count}");
+        assert!(dacl_protected, "profiles.json must have SE_DACL_PROTECTED");
+        assert!(all_owner, "profiles.json ACE must belong to the current user SID");
+    }
+
+    /// P6.1 triangulation — `harden_existing_credential_files` is a no-op for
+    /// non-existent files (must not panic or return an error).
+    #[test]
+    fn harden_existing_credential_files_skips_nonexistent_files() {
+        let dir = TempDir::new().expect("TempDir creation");
+        // No files created — helper must silently skip them.
+        harden_existing_credential_files(dir.path()); // must not panic
+    }
+
+    /// P5.1 — On Windows, vault.json must have an owner-only DACL after creation.
+    ///
+    /// Asserts: exactly 1 ACE, DACL protected, ACE belongs to the current user.
+    /// This test is the RED gate: it will FAIL until P5.2 replaces the old
+    /// write+rename+#[cfg(unix)] block with `crate::fs_secure::secure_write`.
+    #[cfg(windows)]
+    #[test]
+    fn vault_save_to_disk_produces_owner_only_dacl() {
+        let dir = TempDir::new().expect("TempDir creation");
+        let _vault = make_vault(&dir);
+
+        let vault_path = dir.path().join("vault.json");
+        let (ace_count, dacl_protected, all_owner) =
+            crate::fs_secure::assert_owner_only_acl_for_test(&vault_path);
+
+        assert_eq!(
+            ace_count, 1,
+            "vault.json DACL must have exactly 1 ACE; got {ace_count}"
+        );
+        assert!(
+            dacl_protected,
+            "vault.json DACL must have SE_DACL_PROTECTED set (no inherited ACEs)"
+        );
+        assert!(
+            all_owner,
+            "The single ACE must belong to the current user SID"
+        );
+    }
+
+    /// P5.1 triangulation — On Unix, vault.json must have mode 0o600 after creation.
+    #[cfg(unix)]
+    #[test]
+    fn vault_save_to_disk_produces_0600_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().expect("TempDir creation");
+        let _vault = make_vault(&dir);
+
+        let vault_path = dir.path().join("vault.json");
+        let mode = std::fs::metadata(&vault_path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "vault.json must have mode 0o600 on Unix");
     }
 }

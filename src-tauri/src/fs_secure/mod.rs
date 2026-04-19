@@ -7,11 +7,6 @@
 //
 // All platform-specific code lives in `unix.rs`, `windows.rs`, or `fallback.rs`.
 // Zero `#[cfg]` leaks outside this module.
-//
-// Dead-code lint suppressed: callers (vault.rs, profile.rs, commands/*) are
-// wired in Phase 5+. The items are intentionally pub(crate) so the wiring
-// is a trivial `use crate::fs_secure::…` import with no API changes.
-#![allow(dead_code)]
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -41,6 +36,10 @@ pub(crate) enum BestEffortOutcome {
     SkippedUnsupported,
     /// Hardening failed for an unexpected reason. The write succeeded, but
     /// permissions may not be owner-only.
+    ///
+    /// The inner `io::Error` is used in Phase 7 (export flow) to build the
+    /// frontend warning message. Suppressed until that caller is wired.
+    #[allow(dead_code)]
     Failed(io::Error),
 }
 
@@ -189,6 +188,17 @@ fn is_unsupported(e: &io::Error) -> bool {
 #[cfg(test)]
 pub(crate) fn is_unsupported_pub_for_test(e: &io::Error) -> bool {
     is_unsupported(e)
+}
+
+/// Test-seam: re-export `windows::read_dacl_for_test` for use in vault.rs and
+/// profile.rs tests that need to verify DACL hardening without duplicating
+/// the complex Win32 ACE enumeration code.
+///
+/// Returns `(aces_count, dacl_protected, all_ace_sids_eq_current_user)`.
+/// Only compiled on Windows test builds.
+#[cfg(all(test, windows))]
+pub(crate) fn assert_owner_only_acl_for_test(path: &Path) -> (usize, bool, bool) {
+    windows::assert_owner_only_acl_for_test(path)
 }
 
 /// Test-seam: allows injecting an arbitrary `io::Result<()>` into the
