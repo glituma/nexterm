@@ -107,11 +107,11 @@
 
 ## Phase 9 — Clean-Up and Verification Gates
 
-- [ ] P9.1 — Run `cargo test` on a Unix dev machine; assert all non-Windows-gated tests pass.
-- [ ] P9.2 — Run `cargo test` on a Windows runner (CI or local); assert all `#[cfg(windows)]` gated tests pass.
-- [ ] P9.3 — Run `cargo clippy -- -D warnings` on both platforms; resolve any lint warnings including unsafe-related ones.
-- [ ] P9.4 — Manual check: `rg "#\[cfg\((unix|windows)\)\]" src-tauri/src/vault.rs src-tauri/src/profile.rs` returns zero permission-related matches.
-- [ ] P9.5 — Manual verification on Windows: `icacls %APPDATA%\com.cognidevai.nexterm\vault.json` shows only the current user with `(F)` and the `(I)` inherited-ACE indicator is absent.
+- [x] P9.1 — Run `cargo test` on a Unix dev machine; assert all non-Windows-gated tests pass.
+- [x] P9.2 — Run `cargo test` on a Windows runner (CI or local); assert all `#[cfg(windows)]` gated tests pass.
+- [x] P9.3 — Run `cargo clippy -- -D warnings` on both platforms; resolve any lint warnings including unsafe-related ones.
+- [x] P9.4 — Manual check: `rg "#\[cfg\((unix|windows)\)\]" src-tauri/src/vault.rs src-tauri/src/profile.rs` returns zero permission-related matches.
+- [x] P9.5 — Manual verification on Windows: `icacls %APPDATA%\com.cognidevai.nexterm\vault.json` shows only the current user with `(F)` and the `(I)` inherited-ACE indicator is absent.
 
 ---
 

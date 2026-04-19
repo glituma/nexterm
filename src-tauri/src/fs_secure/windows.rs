@@ -68,15 +68,7 @@ impl Drop for HandleGuard {
 /// `SetEntriesInAclW` allocates the ACL buffer via `LocalAlloc`.
 /// `GetNamedSecurityInfoW` allocates the security descriptor similarly.
 /// Both must be freed with `LocalFree`.
-#[allow(dead_code)]
 struct LocalAllocGuard(*mut std::ffi::c_void);
-
-impl LocalAllocGuard {
-    #[allow(dead_code)]
-    fn as_acl_ptr(&self) -> *mut ACL {
-        self.0 as *mut ACL
-    }
-}
 
 impl Drop for LocalAllocGuard {
     fn drop(&mut self) {

@@ -37,9 +37,8 @@ pub(crate) enum BestEffortOutcome {
     /// Hardening failed for an unexpected reason. The write succeeded, but
     /// permissions may not be owner-only.
     ///
-    /// The inner `io::Error` is used in Phase 7 (export flow) to build the
-    /// frontend warning message. Suppressed until that caller is wired.
-    #[allow(dead_code)]
+    /// The inner `io::Error` is used by the export flow to build the frontend
+    /// warning message.
     Failed(io::Error),
 }
 
