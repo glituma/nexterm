@@ -19,6 +19,27 @@ export interface UserCredential {
   isDefault?: boolean;
 }
 
+// ─── Folder ─────────────────────────────────────────────
+
+export interface Folder {
+  id: string;           // UUID
+  name: string;         // "__system__" for the system folder; display via isSystem flag
+  displayOrder: number;
+  isSystem: boolean;
+  isExpanded: boolean;
+  createdAt: string;    // ISO 8601
+  updatedAt: string;    // ISO 8601
+}
+
+export interface ProfilesEnvelope {
+  folders: Folder[];
+  profiles: ConnectionProfile[];
+}
+
+export interface DeleteFolderResult {
+  movedProfileCount: number;
+}
+
 // ─── Connection Profile ─────────────────────────────────
 
 export interface ConnectionProfile {
@@ -30,6 +51,9 @@ export interface ConnectionProfile {
   startupDirectory?: string;
   tunnels: TunnelConfig[];
   displayOrder?: number;
+  /** Folder this profile belongs to. Optional for backward compat during transition;
+   *  after migration every profile has a folderId assigned by the backend. */
+  folderId?: string;
   createdAt: string; // ISO 8601
   updatedAt: string; // ISO 8601
 }

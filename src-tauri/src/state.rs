@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::profile::ConnectionProfile;
+use crate::profile::{ConnectionProfile, Folder};
 use crate::ssh::tunnel::RemoteForwardRegistry;
 use crate::vault::Vault;
 
@@ -27,6 +27,8 @@ pub type TransferId = Uuid;
 pub struct AppState {
     pub sessions: Arc<Mutex<HashMap<SessionId, SessionHandle>>>,
     pub profiles: Mutex<Vec<ConnectionProfile>>,
+    /// In-memory folder list — loaded from the ProfilesEnvelope on startup.
+    pub folders: Mutex<Vec<Folder>>,
     pub vault: Mutex<Option<Vault>>,
 }
 
@@ -35,6 +37,7 @@ impl Default for AppState {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             profiles: Mutex::new(Vec::new()),
+            folders: Mutex::new(Vec::new()),
             vault: Mutex::new(None),
         }
     }
@@ -191,7 +194,7 @@ pub struct TunnelHandle {
 
 // ─── Tunnel Config ──────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TunnelConfig {
     #[serde(default)]

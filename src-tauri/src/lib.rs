@@ -43,11 +43,20 @@ pub fn run() {
             // Profile CRUD
             commands::profile::save_profile,
             commands::profile::load_profiles,
+            commands::profile::load_profiles_with_folders,
             commands::profile::delete_profile,
             commands::profile::get_profile,
             commands::profile::export_profiles,
             commands::profile::import_profiles,
             commands::profile::reorder_profiles,
+            // Folder CRUD (Phase 4)
+            commands::profile::create_folder,
+            commands::profile::rename_folder,
+            commands::profile::delete_folder,
+            commands::profile::reorder_folders,
+            commands::profile::move_profile_to_folder,
+            commands::profile::reorder_profiles_in_folder,
+            commands::profile::set_folder_expanded,
             // Vault
             commands::vault::vault_status,
             commands::vault::vault_create,

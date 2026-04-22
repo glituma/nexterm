@@ -8,6 +8,43 @@ use uuid::Uuid;
 use crate::state::{SessionId, TerminalId};
 use thiserror::Error;
 
+// ─── Profile-Domain Error ────────────────────────────────
+//
+// Fine-grained error enum for folder/profile CRUD operations on
+// `ProfilesEnvelope`. Phase 4 Tauri commands map these to `AppError`
+// via `From<ProfileError> for AppError`.
+
+#[derive(Error, Debug, PartialEq)]
+pub enum ProfileError {
+    /// Folder not found by the given UUID.
+    #[error("Folder not found")]
+    FolderNotFound,
+    /// Profile not found by the given UUID.
+    #[error("Profile not found")]
+    ProfileNotFound,
+    /// Operation rejected: the system folder cannot be renamed or deleted.
+    #[error("System folder is protected and cannot be modified")]
+    SystemFolderProtected,
+    /// Name is empty, whitespace-only, or exceeds 64 characters.
+    #[error("Folder name is invalid (must be 1–64 non-whitespace characters)")]
+    InvalidName,
+    /// A folder with the same name (case-insensitive) already exists.
+    #[error("A folder with this name already exists")]
+    DuplicateName,
+    /// Reorder vector does not include all existing IDs (subset provided).
+    #[error("Reorder list is incomplete — all IDs must be present")]
+    IncompleteReorder,
+    /// Profile belongs to a different folder than the one being reordered.
+    #[error("Profile belongs to a different folder")]
+    ProfileFolderMismatch,
+}
+
+impl From<ProfileError> for AppError {
+    fn from(e: ProfileError) -> Self {
+        AppError::ProfileError(e.to_string())
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum AppError {
     #[error("SSH error: {0}")]

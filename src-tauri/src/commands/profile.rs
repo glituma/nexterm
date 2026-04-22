@@ -1,7 +1,9 @@
-// commands/profile.rs — Profile CRUD Tauri commands
+// commands/profile.rs — Profile CRUD + Folder CRUD Tauri commands
 //
-// Handles: save_profile, load_profiles, delete_profile, get_profile,
-//          export_profiles, import_profiles
+// Handles: save_profile, load_profiles, load_profiles_with_folders,
+//          delete_profile, get_profile, export_profiles, import_profiles,
+//          create_folder, rename_folder, delete_folder, reorder_folders,
+//          move_profile_to_folder, reorder_profiles_in_folder, set_folder_expanded
 //
 // Credential storage is now handled by commands/vault.rs via the encrypted vault.
 
@@ -15,7 +17,10 @@ use argon2::Argon2;
 use rand::RngCore;
 
 use crate::error::AppError;
-use crate::profile::{self, AuthMethodConfig, ConnectionProfile, UserCredential};
+use crate::profile::{
+    self, AuthMethodConfig, ConnectionProfile, DeleteFolderResult, Folder, ProfilesEnvelope,
+    UserCredential,
+};
 use crate::state::{AppState, SessionState};
 
 // ─── Export/Import result types ─────────────────────────
@@ -73,6 +78,13 @@ fn get_app_data_dir(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
 
 // ─── Profile CRUD Commands ──────────────────────────────
 
+/// Save profile command.
+///
+/// Creates or updates a profile. Uses `save_profiles_envelope` so every
+/// write is envelope format — eliminating the legacy re-migration cycle.
+///
+/// Arg validation: `profile_data` is validated by `ConnectionProfile::validate`.
+/// Error cases: invalid profile data, disk write failure.
 #[tauri::command]
 pub async fn save_profile(
     app: tauri::AppHandle,
@@ -82,8 +94,10 @@ pub async fn save_profile(
     profile_data.validate()?;
     profile_data.updated_at = chrono::Utc::now();
 
-    let mut profiles = state.profiles.lock().await;
     let app_data_dir = get_app_data_dir(&app);
+
+    let mut profiles = state.profiles.lock().await;
+    let folders = state.folders.lock().await;
 
     // Check if updating existing or creating new
     if let Some(existing) = profiles.iter_mut().find(|p| p.id == profile_data.id) {
@@ -97,10 +111,21 @@ pub async fn save_profile(
         let max_order = profiles.iter().map(|p| p.display_order).max().unwrap_or(0);
         profile_data.display_order = max_order + 1;
         profile_data.created_at = chrono::Utc::now();
+        // Assign to system folder if no folder_id specified
+        if profile_data.folder_id.is_none() {
+            if let Some(sys_folder) = folders.iter().find(|f| f.is_system) {
+                profile_data.folder_id = Some(sys_folder.id);
+            }
+        }
         profiles.push(profile_data.clone());
     }
 
-    profile::save_profiles_to_disk(&profiles, app_data_dir.as_ref())?;
+    // Build envelope from updated state and persist
+    let envelope = ProfilesEnvelope {
+        folders: folders.clone(),
+        profiles: profiles.clone(),
+    };
+    profile::save_profiles_envelope(&envelope, app_data_dir.as_ref())?;
 
     Ok(profile_data.id)
 }
@@ -111,13 +136,22 @@ pub async fn load_profiles(
     state: State<'_, AppState>,
 ) -> Result<Vec<ConnectionProfile>, AppError> {
     let app_data_dir = get_app_data_dir(&app);
-    let loaded = profile::load_profiles_from_disk(app_data_dir.as_ref())?;
+    // Phase 2: load_profiles_from_disk now returns ProfilesEnvelope.
+    // This command retains its Vec<ConnectionProfile> return type for backward
+    // compat with the existing frontend. Phase 4 will add `load_profiles_with_folders`
+    // which exposes the full envelope.
+    let envelope = profile::load_profiles_from_disk(app_data_dir.as_ref())?;
 
-    // Sync in-memory state
+    // Sync in-memory state — both profiles and folders
     let mut profiles = state.profiles.lock().await;
-    *profiles = loaded.clone();
+    *profiles = envelope.profiles.clone();
+    drop(profiles);
 
-    Ok(loaded)
+    let mut folders = state.folders.lock().await;
+    *folders = envelope.folders.clone();
+    drop(folders);
+
+    Ok(envelope.profiles)
 }
 
 #[tauri::command]
@@ -142,6 +176,7 @@ pub async fn delete_profile(
     } // sessions lock dropped here before acquiring profiles lock
 
     let mut profiles = state.profiles.lock().await;
+    let folders = state.folders.lock().await;
     let app_data_dir = get_app_data_dir(&app);
 
     let initial_len = profiles.len();
@@ -153,10 +188,16 @@ pub async fn delete_profile(
         )));
     }
 
-    profile::save_profiles_to_disk(&profiles, app_data_dir.as_ref())?;
+    // Persist as envelope (no more legacy flat-array)
+    let envelope = ProfilesEnvelope {
+        folders: folders.clone(),
+        profiles: profiles.clone(),
+    };
+    profile::save_profiles_envelope(&envelope, app_data_dir.as_ref())?;
 
     // Clean up vault credentials for this profile (best-effort)
     drop(profiles); // release profiles lock before acquiring vault lock
+    drop(folders);  // release folders lock too
     let _ = crate::commands::vault::delete_profile_credentials(&state, &profile_id).await;
 
     Ok(())
@@ -175,8 +216,347 @@ pub async fn get_profile(
         .ok_or_else(|| AppError::ProfileError(format!("Profile not found: {profile_id}")))
 }
 
+// ─── New Phase 4: load_profiles_with_folders ────────
+
+/// Load the full `ProfilesEnvelope` (folders + profiles) from the current
+/// in-memory state, triggering a disk load if state is empty.
+///
+/// Returns the full envelope so the frontend can render the folder tree.
+/// This command supplements `load_profiles` — the existing command is kept
+/// for backward compat and still returns `Vec<ConnectionProfile>`.
+///
+/// Error cases: disk read/parse failure.
+#[tauri::command]
+pub async fn load_profiles_with_folders(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ProfilesEnvelope, AppError> {
+    let app_data_dir = get_app_data_dir(&app);
+
+    // If state not yet loaded, trigger disk load (same as load_profiles)
+    {
+        let profiles = state.profiles.lock().await;
+        let folders = state.folders.lock().await;
+        if profiles.is_empty() && folders.is_empty() {
+            // State not loaded yet — fall through to disk load below
+            drop(profiles);
+            drop(folders);
+        } else {
+            let envelope = ProfilesEnvelope {
+                folders: folders.clone(),
+                profiles: profiles.clone(),
+            };
+            return Ok(envelope);
+        }
+    }
+
+    // Disk load + populate state
+    let envelope = profile::load_profiles_from_disk(app_data_dir.as_ref())?;
+
+    let mut profiles = state.profiles.lock().await;
+    let mut folders = state.folders.lock().await;
+    *profiles = envelope.profiles.clone();
+    *folders = envelope.folders.clone();
+
+    Ok(envelope)
+}
+
+// ─── New Phase 4: Folder CRUD Commands ──────────────
+
+/// Create a new user folder with the given name.
+///
+/// Validation: name trimmed, 1–64 chars, no case-insensitive duplicate.
+/// Rollback: on persist failure, in-memory state is restored from snapshot.
+///
+/// Error cases: `InvalidName`, `DuplicateName`, disk write failure.
+#[tauri::command]
+pub async fn create_folder(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<Folder, AppError> {
+    let app_data_dir = get_app_data_dir(&app);
+
+    let mut profiles = state.profiles.lock().await;
+    let mut folders = state.folders.lock().await;
+
+    // Build envelope + snapshot for rollback
+    let mut envelope = ProfilesEnvelope {
+        folders: folders.clone(),
+        profiles: profiles.clone(),
+    };
+    let snapshot = envelope.clone();
+
+    // Mutate via pure method
+    let new_folder = envelope.create_folder(name).map_err(AppError::from)?;
+
+    // Persist — rollback on failure
+    if let Err(e) = profile::save_profiles_envelope(&envelope, app_data_dir.as_ref()) {
+        // Restore in-memory state from snapshot
+        *folders = snapshot.folders;
+        *profiles = snapshot.profiles;
+        return Err(e);
+    }
+
+    // Write back to AppState
+    *folders = envelope.folders;
+    *profiles = envelope.profiles;
+
+    Ok(new_folder)
+}
+
+/// Rename an existing user folder.
+///
+/// Validation: name trimmed, 1–64 chars, no case-insensitive duplicate.
+/// Rejects: system folders.
+/// Rollback: on persist failure, in-memory state is restored from snapshot.
+///
+/// Error cases: `FolderNotFound`, `SystemFolderProtected`, `InvalidName`,
+/// `DuplicateName`, disk write failure.
+#[tauri::command]
+pub async fn rename_folder(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    folder_id: Uuid,
+    new_name: String,
+) -> Result<Folder, AppError> {
+    let app_data_dir = get_app_data_dir(&app);
+
+    let mut profiles = state.profiles.lock().await;
+    let mut folders = state.folders.lock().await;
+
+    let mut envelope = ProfilesEnvelope {
+        folders: folders.clone(),
+        profiles: profiles.clone(),
+    };
+    let snapshot = envelope.clone();
+
+    let renamed_folder = envelope.rename_folder(folder_id, new_name).map_err(AppError::from)?;
+
+    if let Err(e) = profile::save_profiles_envelope(&envelope, app_data_dir.as_ref()) {
+        *folders = snapshot.folders;
+        *profiles = snapshot.profiles;
+        return Err(e);
+    }
+
+    *folders = envelope.folders;
+    *profiles = envelope.profiles;
+
+    Ok(renamed_folder)
+}
+
+/// Delete a user folder.
+///
+/// If the folder contains profiles, they are moved to the system folder
+/// preserving relative order. Returns `DeleteFolderResult` with the count
+/// of moved profiles.
+/// Rejects: system folders, non-existent UUIDs.
+/// Rollback: on persist failure, in-memory state is restored from snapshot.
+///
+/// Error cases: `FolderNotFound`, `SystemFolderProtected`, disk write failure.
+#[tauri::command]
+pub async fn delete_folder(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    folder_id: Uuid,
+) -> Result<DeleteFolderResult, AppError> {
+    let app_data_dir = get_app_data_dir(&app);
+
+    let mut profiles = state.profiles.lock().await;
+    let mut folders = state.folders.lock().await;
+
+    let mut envelope = ProfilesEnvelope {
+        folders: folders.clone(),
+        profiles: profiles.clone(),
+    };
+    let snapshot = envelope.clone();
+
+    let result = envelope.delete_folder(folder_id).map_err(AppError::from)?;
+
+    if let Err(e) = profile::save_profiles_envelope(&envelope, app_data_dir.as_ref()) {
+        *folders = snapshot.folders;
+        *profiles = snapshot.profiles;
+        return Err(e);
+    }
+
+    *folders = envelope.folders;
+    *profiles = envelope.profiles;
+
+    Ok(result)
+}
+
+/// Reorder all folders.
+///
+/// `ordered_ids` must contain exactly the same UUIDs as the current folder list.
+/// Each folder's `display_order` is set to its index in `ordered_ids`.
+/// Rollback: on persist failure, in-memory state is restored from snapshot.
+///
+/// Error cases: `FolderNotFound` (unknown UUID), `IncompleteReorder` (missing UUID),
+/// disk write failure.
+#[tauri::command]
+pub async fn reorder_folders(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    ordered_ids: Vec<Uuid>,
+) -> Result<(), AppError> {
+    let app_data_dir = get_app_data_dir(&app);
+
+    let mut profiles = state.profiles.lock().await;
+    let mut folders = state.folders.lock().await;
+
+    let mut envelope = ProfilesEnvelope {
+        folders: folders.clone(),
+        profiles: profiles.clone(),
+    };
+    let snapshot = envelope.clone();
+
+    envelope.reorder_folders(ordered_ids).map_err(AppError::from)?;
+
+    if let Err(e) = profile::save_profiles_envelope(&envelope, app_data_dir.as_ref()) {
+        *folders = snapshot.folders;
+        *profiles = snapshot.profiles;
+        return Err(e);
+    }
+
+    *folders = envelope.folders;
+    *profiles = envelope.profiles;
+
+    Ok(())
+}
+
+/// Move a profile to a different folder (or reorder within the same folder).
+///
+/// Cross-folder: profile's `folder_id` is updated; siblings in target folder
+/// with `display_order >= new_order` are shifted by +1.
+/// Same-folder: sorted-list reinsert with sequential display_order compaction.
+/// Rollback: on persist failure, in-memory state is restored from snapshot.
+///
+/// Error cases: `FolderNotFound`, `ProfileNotFound`, disk write failure.
+#[tauri::command]
+pub async fn move_profile_to_folder(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    profile_id: Uuid,
+    target_folder_id: Uuid,
+    new_order: i32,
+) -> Result<(), AppError> {
+    let app_data_dir = get_app_data_dir(&app);
+
+    let mut profiles = state.profiles.lock().await;
+    let mut folders = state.folders.lock().await;
+
+    let mut envelope = ProfilesEnvelope {
+        folders: folders.clone(),
+        profiles: profiles.clone(),
+    };
+    let snapshot = envelope.clone();
+
+    envelope
+        .move_profile_to_folder(profile_id, target_folder_id, new_order)
+        .map_err(AppError::from)?;
+
+    if let Err(e) = profile::save_profiles_envelope(&envelope, app_data_dir.as_ref()) {
+        *folders = snapshot.folders;
+        *profiles = snapshot.profiles;
+        return Err(e);
+    }
+
+    *folders = envelope.folders;
+    *profiles = envelope.profiles;
+
+    Ok(())
+}
+
+/// Reorder all profiles within a specific folder.
+///
+/// `ordered_profile_ids` must contain exactly the same profile UUIDs that
+/// currently belong to `folder_id`.
+/// Rollback: on persist failure, in-memory state is restored from snapshot.
+///
+/// Error cases: `FolderNotFound`, `ProfileNotFound`, `ProfileFolderMismatch`,
+/// `IncompleteReorder`, disk write failure.
+#[tauri::command]
+pub async fn reorder_profiles_in_folder(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    folder_id: Uuid,
+    ordered_profile_ids: Vec<Uuid>,
+) -> Result<(), AppError> {
+    let app_data_dir = get_app_data_dir(&app);
+
+    let mut profiles = state.profiles.lock().await;
+    let mut folders = state.folders.lock().await;
+
+    let mut envelope = ProfilesEnvelope {
+        folders: folders.clone(),
+        profiles: profiles.clone(),
+    };
+    let snapshot = envelope.clone();
+
+    envelope
+        .reorder_profiles_in_folder(folder_id, ordered_profile_ids)
+        .map_err(AppError::from)?;
+
+    if let Err(e) = profile::save_profiles_envelope(&envelope, app_data_dir.as_ref()) {
+        *folders = snapshot.folders;
+        *profiles = snapshot.profiles;
+        return Err(e);
+    }
+
+    *folders = envelope.folders;
+    *profiles = envelope.profiles;
+
+    Ok(())
+}
+
+/// Set the `is_expanded` state of a folder (persisted to disk).
+///
+/// Idempotent: calling with the same value is a no-op but does not error.
+/// Rollback: on persist failure, in-memory state is restored from snapshot.
+///
+/// Error cases: `FolderNotFound`, disk write failure.
+#[tauri::command]
+pub async fn set_folder_expanded(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    folder_id: Uuid,
+    expanded: bool,
+) -> Result<(), AppError> {
+    let app_data_dir = get_app_data_dir(&app);
+
+    let mut profiles = state.profiles.lock().await;
+    let mut folders = state.folders.lock().await;
+
+    let mut envelope = ProfilesEnvelope {
+        folders: folders.clone(),
+        profiles: profiles.clone(),
+    };
+    let snapshot = envelope.clone();
+
+    envelope
+        .set_folder_expanded(folder_id, expanded)
+        .map_err(AppError::from)?;
+
+    if let Err(e) = profile::save_profiles_envelope(&envelope, app_data_dir.as_ref()) {
+        *folders = snapshot.folders;
+        *profiles = snapshot.profiles;
+        return Err(e);
+    }
+
+    *folders = envelope.folders;
+    *profiles = envelope.profiles;
+
+    Ok(())
+}
+
 // ─── Reorder Profiles ───────────────────────────────
 
+/// Reorder all profiles (legacy flat reorder — no folder context).
+///
+/// Updates `display_order` for each profile based on position in `profile_ids`.
+/// Uses envelope persistence (no re-migration cycle).
+///
+/// Error cases: disk write failure.
 #[tauri::command]
 pub async fn reorder_profiles(
     app: tauri::AppHandle,
@@ -184,6 +564,7 @@ pub async fn reorder_profiles(
     profile_ids: Vec<Uuid>,
 ) -> Result<(), AppError> {
     let mut profiles = state.profiles.lock().await;
+    let folders = state.folders.lock().await;
     let app_data_dir = get_app_data_dir(&app);
 
     // Update display_order based on the position in the provided list
@@ -196,7 +577,12 @@ pub async fn reorder_profiles(
     // Sort in-memory to match the new order
     profiles.sort_by_key(|p| p.display_order);
 
-    profile::save_profiles_to_disk(&profiles, app_data_dir.as_ref())?;
+    // Persist as envelope
+    let envelope = ProfilesEnvelope {
+        folders: folders.clone(),
+        profiles: profiles.clone(),
+    };
+    profile::save_profiles_envelope(&envelope, app_data_dir.as_ref())?;
 
     Ok(())
 }
@@ -503,6 +889,7 @@ pub async fn import_profiles(
             startup_directory: None,
             tunnels: Vec::new(),
             display_order: max_order + 1,
+            folder_id: None,
             created_at: now,
             updated_at: now,
         };
@@ -533,9 +920,15 @@ pub async fn import_profiles(
         imported += 1;
     }
 
-    // Persist if anything was imported
+    // Persist if anything was imported — use envelope format (no re-migration cycle)
     if imported > 0 {
-        profile::save_profiles_to_disk(&profiles, app_data_dir.as_ref())?;
+        let folders = state.folders.lock().await;
+        let envelope = ProfilesEnvelope {
+            folders: folders.clone(),
+            profiles: profiles.clone(),
+        };
+        drop(folders);
+        profile::save_profiles_envelope(&envelope, app_data_dir.as_ref())?;
     }
 
     // Drop profiles lock before acquiring vault lock (avoid deadlock)
@@ -641,6 +1034,7 @@ fn decrypt_export_data(data: &[u8], password: &str) -> Result<Vec<u8>, AppError>
 mod tests {
     use super::*;
     use crate::fs_secure::BestEffortOutcome;
+    use crate::profile::{DeleteFolderResult, Folder, ProfilesEnvelope};
     use std::io;
 
     // ── P7.1 / P7.2 — ExportResult shape and warning mapping ────────────────
@@ -695,5 +1089,60 @@ mod tests {
         // Frontend depends on this exact string for i18n mapping.
         let result = build_export_result(1, BestEffortOutcome::SkippedUnsupported);
         assert_eq!(result.warnings[0], "acl_not_applied");
+    }
+
+    // ── P4.4 command surface smoke tests (library-layer only — no Tauri ceremony) ──
+    //
+    // We cannot call async Tauri commands directly in unit tests (require AppHandle).
+    // Instead we verify the TYPE CONTRACT: that all result types serialize correctly
+    // and that the pure method layer (ProfilesEnvelope) works when called in the
+    // same pattern the commands use (build envelope → mutate → check).
+
+    // P4.4a — create_folder command pattern: build envelope → mutate → verify result
+    #[test]
+    fn command_pattern_create_folder_produces_serializable_folder() {
+        use crate::profile::{make_system_folder_for_test, ProfilesEnvelope};
+        let sys = make_system_folder_for_test();
+        let sys_id = sys.id;
+        let mut env = ProfilesEnvelope {
+            folders: vec![sys],
+            profiles: vec![],
+        };
+        let snapshot = env.clone();
+        let folder = env.create_folder("My Servers".to_string())
+            .expect("create_folder must succeed");
+        // Verify snapshot is unaffected (rollback contract)
+        assert_eq!(snapshot.folders.len(), 1, "snapshot unaffected");
+        // Verify result serializes cleanly
+        let json = serde_json::to_string(&folder).expect("Folder must be Serialize");
+        assert!(json.contains("\"name\":\"My Servers\""), "name must serialize: {json}");
+        assert!(json.contains("\"isSystem\":false"), "isSystem must serialize: {json}");
+        // Verify envelope state
+        assert_eq!(env.folders.len(), 2);
+        assert!(env.folders.iter().any(|f| f.id == sys_id));
+    }
+
+    // P4.4b — delete_folder command pattern: DeleteFolderResult serializes to camelCase
+    #[test]
+    fn command_pattern_delete_folder_result_camel_case() {
+        let result = DeleteFolderResult { moved_profile_count: 5 };
+        let json = serde_json::to_string(&result).expect("must serialize");
+        assert!(
+            json.contains("\"movedProfileCount\":5"),
+            "must be camelCase: {json}"
+        );
+    }
+
+    // P4.4c — ProfilesEnvelope serializes for load_profiles_with_folders return type
+    #[test]
+    fn command_pattern_profiles_envelope_serializes() {
+        use crate::profile::{make_system_folder_for_test, ProfilesEnvelope};
+        let env = ProfilesEnvelope {
+            folders: vec![make_system_folder_for_test()],
+            profiles: vec![],
+        };
+        let json = serde_json::to_string(&env).expect("ProfilesEnvelope must be Serialize");
+        assert!(json.contains("\"folders\""), "must have 'folders' key: {json}");
+        assert!(json.contains("\"profiles\""), "must have 'profiles' key: {json}");
     }
 }
