@@ -21,7 +21,7 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { useProfileStore, sortedFolders, profilesByFolder, systemFolder } from "../../stores/profileStore";
+import { useProfileStore, sortedFolders, profilesByFolder } from "../../stores/profileStore";
 import { useShallow } from "zustand/react/shallow";
 import {
   useSessionStore,
@@ -1001,13 +1001,20 @@ export function Sidebar({
     })),
   );
 
-  // Subscribe to derived state separately to avoid unnecessary re-renders
-  const folders = useProfileStore((s) => sortedFolders(s));
-  const profileMap = useProfileStore((s) => profilesByFolder(s));
-  // systemFolder used indirectly — imported but consumed only in FolderRow via isSystem check
-  useProfileStore((s) => systemFolder(s)); // keep store subscription stable
+  // Subscribe to raw store slices (stable references) and derive with useMemo.
+  // Selectors like sortedFolders / profilesByFolder allocate new arrays/maps on
+  // every call, so passing them directly to useProfileStore causes the
+  // "getSnapshot should be cached" infinite-loop in React 19. Computing them
+  // via useMemo downstream sidesteps that while keeping the same data shape.
+  const rawFolders = useProfileStore((s) => s.folders);
   const allProfiles = useProfileStore((s) => s.profiles);
   const expandedFolderIds = useProfileStore((s) => s.expandedFolderIds);
+
+  const folders = useMemo(() => sortedFolders({ folders: rawFolders }), [rawFolders]);
+  const profileMap = useMemo(
+    () => profilesByFolder({ profiles: allProfiles }),
+    [allProfiles],
+  );
 
   const { sessions, activeSessionId, setActiveSession } = useSessionStore();
 
