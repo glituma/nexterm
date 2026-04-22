@@ -35,3 +35,6 @@ npm-debug.log*
 
 # ATL
 .atl/
+
+# Local scratch
+tmp/
