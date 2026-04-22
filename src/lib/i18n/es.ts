@@ -365,6 +365,7 @@ export const es: Record<TranslationKey, string> = {
   "sidebar.folders.profileCount_one": "{count} perfil",
   "sidebar.folders.profileCount_other": "{count} perfiles",
   "sidebar.folders.dragHandle": "Arrastrar para reordenar",
+  "sidebar.folders.dragHandleTooltip": "Arrastrar para reordenar dentro de esta carpeta. Usá el menú \u00b7\u00b7\u00b7 para mover entre carpetas.",
 
   // General
   "general.ok": "OK",

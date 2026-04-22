@@ -363,6 +363,7 @@ export const en = {
   "sidebar.folders.profileCount_one": "{count} profile",
   "sidebar.folders.profileCount_other": "{count} profiles",
   "sidebar.folders.dragHandle": "Drag to reorder",
+  "sidebar.folders.dragHandleTooltip": "Drag to reorder within this folder. Use the \u00b7\u00b7\u00b7 menu to move between folders.",
 
   // General
   "general.ok": "OK",

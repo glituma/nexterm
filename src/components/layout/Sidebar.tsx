@@ -251,6 +251,7 @@ function SortableProfileCard({
           <div
             className="sidebar-drag-handle"
             aria-label={t("sidebar.folders.dragHandle")}
+            title={t("sidebar.folders.dragHandleTooltip")}
             {...attributes}
             {...listeners}
           >
