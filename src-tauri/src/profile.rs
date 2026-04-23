@@ -752,12 +752,44 @@ pub fn load_profiles_from_disk(
         ProfilesFormat::Envelope => {
             let mut envelope: ProfilesEnvelope = serde_json::from_slice(&bytes)
                 .map_err(|e| AppError::ProfileError(format!("Failed to parse profiles envelope: {e}")))?;
+            let mut healed = false;
 
             // Ensure system folder exists (spec R2 auto-heal)
             if !envelope.folders.iter().any(|f| f.is_system) {
                 tracing::warn!("profiles.json has no system folder — auto-healing");
                 envelope.folders.push(make_system_folder());
-                // Persist the healed envelope
+                healed = true;
+            }
+
+            let system_folder_id = envelope
+                .folders
+                .iter()
+                .find(|f| f.is_system)
+                .map(|f| f.id)
+                .expect("system folder must exist after auto-heal");
+            let mut next_system_order = envelope
+                .profiles
+                .iter()
+                .filter(|profile| profile.folder_id == Some(system_folder_id))
+                .map(|profile| profile.display_order)
+                .max()
+                .unwrap_or(-1)
+                + 1;
+
+            for profile in envelope.profiles.iter_mut() {
+                if profile.folder_id.is_none() {
+                    tracing::warn!(
+                        profile_id = %profile.id,
+                        "profile has null folder_id — auto-healing into system folder"
+                    );
+                    profile.folder_id = Some(system_folder_id);
+                    profile.display_order = next_system_order;
+                    next_system_order += 1;
+                    healed = true;
+                }
+            }
+
+            if healed {
                 if let Err(e) = save_profiles_envelope(&envelope, app_data_dir) {
                     tracing::warn!("Failed to persist healed envelope: {e}");
                 }
@@ -1396,6 +1428,52 @@ mod tests {
         assert_eq!(envelope.folders.len(), 1, "must return exactly 1 folder (system folder)");
         assert!(envelope.folders[0].is_system, "the folder must be is_system: true");
         assert_eq!(envelope.profiles.len(), 0, "must return 0 profiles");
+    }
+
+    #[test]
+    fn envelope_load_heals_profiles_with_null_folder_id() {
+        let dir = TempDir::new().expect("TempDir");
+        let dir_path = dir.path().to_path_buf();
+        let system_folder = make_system_folder();
+
+        let mut profile = ConnectionProfile::default();
+        profile.name = "Imported".to_string();
+        profile.host = "192.168.2.74".to_string();
+        profile.port = 22;
+        profile.users = vec![UserCredential {
+            id: Uuid::new_v4(),
+            username: "root".to_string(),
+            auth_method: AuthMethodConfig::Password,
+            is_default: true,
+        }];
+        profile.folder_id = None;
+        profile.display_order = 99;
+
+        let envelope = ProfilesEnvelope {
+            folders: vec![system_folder.clone()],
+            profiles: vec![profile],
+        };
+        save_profiles_envelope(&envelope, Some(&dir_path)).expect("seed envelope must persist");
+
+        let loaded = load_profiles_from_disk(Some(&dir_path)).expect("load must succeed");
+        assert_eq!(loaded.profiles.len(), 1, "must preserve profile count");
+        assert_eq!(
+            loaded.profiles[0].folder_id,
+            Some(system_folder.id),
+            "null folder_id must be healed into system folder"
+        );
+        assert_eq!(
+            loaded.profiles[0].display_order,
+            0,
+            "healed profile should be appended to the system folder ordering"
+        );
+
+        let persisted = load_profiles_from_disk(Some(&dir_path)).expect("healed envelope must reload");
+        assert_eq!(
+            persisted.profiles[0].folder_id,
+            Some(system_folder.id),
+            "healed folder_id must be persisted to disk"
+        );
     }
 
     // ── P2.6 [RED] — legacy migration writes backup BEFORE saving envelope ─

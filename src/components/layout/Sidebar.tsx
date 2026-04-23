@@ -216,6 +216,7 @@ function SortableProfileCard({
       .map((s) => s.userId)
       .filter(Boolean)
   );
+  const hasSelectedSession = (profileSessions ?? []).some((session) => session.id === activeSessionId);
 
   function handleConnectClick() {
     if (isSingleUser) {
@@ -242,7 +243,7 @@ function SortableProfileCard({
     <div ref={setNodeRef} style={style} onContextMenu={handleContextMenu}>
       {/* Profile card */}
       <div
-        className={`sidebar-profile-card ${connected ? "sidebar-profile-card-connected" : ""}`}
+        className={`sidebar-profile-card ${connected ? "sidebar-profile-card-connected" : ""} ${isExpanded || hasSelectedSession ? "sidebar-profile-card-selected" : ""}`}
         onClick={() => onProfileClick(p.id)}
         title={subtitle}
       >
@@ -355,13 +356,13 @@ function SortableProfileCard({
               >
                 <div className="sidebar-nested-session-left">
                   <SessionStateIndicator state={s.state} />
-                  <div className="sidebar-nested-session-info">
-                    <div className="sidebar-nested-session-host">
-                      {s.username}@{s.host}
-                    </div>
-                    <div className="sidebar-nested-session-state">
+                  <div className="sidebar-nested-session-host" title={`${s.username}@${s.host}`}>
+                    {s.username}@{s.host}
+                  </div>
+                  <div className="sidebar-nested-session-meta">
+                    <span className="sidebar-nested-session-state">
                       {t(getSessionStateKey(s.state))}
-                    </div>
+                    </span>
                   </div>
                 </div>
                 <button
@@ -585,8 +586,13 @@ function FolderRow({
         </span>
 
         {/* Profile count badge */}
-        <span className="sidebar-section-badge" style={{ marginRight: "4px", fontSize: "11px" }}>
-          {profileCountLabel(count, t)}
+        <span
+          className="sidebar-section-badge sidebar-folder-count-badge"
+          style={{ marginRight: "4px" }}
+          title={profileCountLabel(count, t)}
+          aria-label={profileCountLabel(count, t)}
+        >
+          {count}
         </span>
 
         {/* ⋯ menu button — non-system folders show rename+delete, all show it */}
@@ -594,13 +600,12 @@ function FolderRow({
           <div style={{ position: "relative" }}>
             <button
               ref={menuBtnRef}
-              className="sidebar-profile-btn"
+              className="sidebar-profile-btn sidebar-folder-menu-btn"
               title={t("sidebar.folders.rename")}
               onClick={(e) => {
                 e.stopPropagation();
                 setMenuOpen((prev) => !prev);
               }}
-              style={{ fontSize: "14px", fontWeight: 700, letterSpacing: "1px" }}
             >
               {"⋯"}
             </button>

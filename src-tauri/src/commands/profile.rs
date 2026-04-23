@@ -7,6 +7,8 @@
 //
 // Credential storage is now handled by commands/vault.rs via the encrypted vault.
 
+use std::collections::HashMap;
+
 use serde::Serialize;
 use tauri::{Manager, State};
 use uuid::Uuid;
@@ -590,7 +592,7 @@ pub async fn reorder_profiles(
 // ─── Export / Import ────────────────────────────────────
 
 /// Exported user credential within a v2 export.
-#[derive(Debug, Serialize, serde::Deserialize)]
+#[derive(Debug, Serialize, serde::Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 struct ExportedUser {
     username: String,
@@ -608,6 +610,22 @@ struct ExportedUser {
 /// v1: had top-level `username`, `auth_method`, `password`
 /// v2: has `users` array
 #[derive(Debug, Serialize, serde::Deserialize)]
+#[derive(Clone)]
+#[serde(rename_all = "snake_case")]
+struct ExportedFolder {
+    name: String,
+    #[serde(default)]
+    display_order: i32,
+    #[serde(default = "default_is_expanded_export")]
+    is_expanded: bool,
+}
+
+fn default_is_expanded_export() -> bool {
+    true
+}
+
+#[derive(Debug, Serialize, serde::Deserialize)]
+#[derive(Clone)]
 #[serde(rename_all = "snake_case")]
 struct ExportedProfile {
     name: String,
@@ -616,6 +634,10 @@ struct ExportedProfile {
     /// v2 format: array of users
     #[serde(default)]
     users: Vec<ExportedUser>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    folder_name: Option<String>,
+    #[serde(default)]
+    display_order: i32,
     /// Legacy v1 fields — used for importing old exports
     #[serde(default, skip_serializing)]
     username: Option<String>,
@@ -628,11 +650,13 @@ struct ExportedProfile {
 }
 
 /// Top-level export envelope (plain JSON).
-#[derive(Debug, Serialize, serde::Deserialize)]
+#[derive(Debug, Serialize, serde::Deserialize, Clone)]
 struct ExportEnvelope {
     version: u32,
     app: String,
     exported_at: String,
+    #[serde(default)]
+    folders: Vec<ExportedFolder>,
     profiles: Vec<ExportedProfile>,
 }
 
@@ -650,8 +674,8 @@ pub struct ImportResult {
     pub errors: Vec<String>,
 }
 
-impl From<&ConnectionProfile> for ExportedProfile {
-    fn from(p: &ConnectionProfile) -> Self {
+impl ExportedProfile {
+    fn from_profile(p: &ConnectionProfile, folder_name: Option<String>) -> Self {
         let users: Vec<ExportedUser> = p
             .users
             .iter()
@@ -679,12 +703,47 @@ impl From<&ConnectionProfile> for ExportedProfile {
             host: p.host.clone(),
             port: p.port,
             users,
+            folder_name,
+            display_order: p.display_order,
             // Legacy fields not serialized
             username: None,
             auth_method: None,
             private_key_path: None,
             password: None,
         }
+    }
+}
+
+fn build_export_envelope(profiles: &[ConnectionProfile], folders: &[Folder]) -> ExportEnvelope {
+    let folder_by_id: HashMap<Uuid, &Folder> = folders.iter().map(|folder| (folder.id, folder)).collect();
+    let exported_folders = folders
+        .iter()
+        .filter(|folder| !folder.is_system)
+        .map(|folder| ExportedFolder {
+            name: folder.name.clone(),
+            display_order: folder.display_order,
+            is_expanded: folder.is_expanded,
+        })
+        .collect();
+
+    let exported_profiles: Vec<ExportedProfile> = profiles
+        .iter()
+        .map(|profile| {
+            let folder_name = profile
+                .folder_id
+                .and_then(|folder_id| folder_by_id.get(&folder_id).copied())
+                .filter(|folder| !folder.is_system)
+                .map(|folder| folder.name.clone());
+            ExportedProfile::from_profile(profile, folder_name)
+        })
+        .collect();
+
+    ExportEnvelope {
+        version: 3,
+        app: "NexTerm".to_string(),
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        folders: exported_folders,
+        profiles: exported_profiles,
     }
 }
 
@@ -696,6 +755,7 @@ pub async fn export_profiles(
     export_password: Option<String>,
 ) -> Result<ExportResult, AppError> {
     let profiles = state.profiles.lock().await;
+    let folders = state.folders.lock().await;
 
     if profiles.is_empty() {
         return Err(AppError::ProfileError("No profiles to export".to_string()));
@@ -707,8 +767,8 @@ pub async fn export_profiles(
         ));
     }
 
-    let mut exported: Vec<ExportedProfile> = profiles.iter().map(ExportedProfile::from).collect();
-    let count = exported.len() as u32;
+    let mut envelope = build_export_envelope(&profiles, &folders);
+    let count = envelope.profiles.len() as u32;
 
     // If including credentials, read passwords from vault (per user)
     if include_credentials {
@@ -725,21 +785,14 @@ pub async fn export_profiles(
                             "password",
                         )
                     {
-                        if j < exported[i].users.len() {
-                            exported[i].users[j].password = Some(password);
+                        if j < envelope.profiles[i].users.len() {
+                            envelope.profiles[i].users[j].password = Some(password);
                         }
                     }
                 }
             }
         }
     }
-
-    let envelope = ExportEnvelope {
-        version: 2,
-        app: "NexTerm".to_string(),
-        exported_at: chrono::Utc::now().to_rfc3339(),
-        profiles: exported,
-    };
 
     let json = serde_json::to_string_pretty(&envelope)?;
 
@@ -798,14 +851,84 @@ pub async fn import_profiles(
     }
 
     let mut profiles = state.profiles.lock().await;
+    let mut folders = state.folders.lock().await;
     let app_data_dir = get_app_data_dir(&app);
+    let system_folder_id = folders
+        .iter()
+        .find(|folder| folder.is_system)
+        .map(|folder| folder.id)
+        .ok_or_else(|| AppError::ProfileError("System folder not found during import".to_string()))?;
 
     let mut imported: u32 = 0;
     let mut skipped: u32 = 0;
     let mut errors: Vec<String> = Vec::new();
     let mut credentials_to_store: Vec<(Uuid, Option<Uuid>, String)> = Vec::new();
+    let mut created_folders = 0u32;
+    let mut next_order_by_folder: HashMap<Uuid, i32> = folders
+        .iter()
+        .map(|folder| {
+            let next_order = profiles
+                .iter()
+                .filter(|profile| profile.folder_id == Some(folder.id))
+                .map(|profile| profile.display_order)
+                .max()
+                .unwrap_or(-1)
+                + 1;
+            (folder.id, next_order)
+        })
+        .collect();
+    let mut folder_ids_by_name: HashMap<String, Uuid> = folders
+        .iter()
+        .filter(|folder| !folder.is_system)
+        .map(|folder| (folder.name.to_lowercase(), folder.id))
+        .collect();
 
-    for ep in &envelope.profiles {
+    let mut exported_folders = envelope.folders.clone();
+    exported_folders.sort_by(|left, right| {
+        left.display_order
+            .cmp(&right.display_order)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+
+    for exported_folder in exported_folders {
+        let trimmed_name = exported_folder.name.trim();
+        if trimmed_name.is_empty() || trimmed_name == crate::profile::SYSTEM_FOLDER_NAME {
+            continue;
+        }
+
+        let key = trimmed_name.to_lowercase();
+        if folder_ids_by_name.contains_key(&key) {
+            continue;
+        }
+
+        let max_order = folders.iter().map(|folder| folder.display_order).max().unwrap_or(-1);
+        let now = chrono::Utc::now();
+        let folder = Folder {
+            id: Uuid::new_v4(),
+            name: trimmed_name.to_string(),
+            display_order: max_order + 1,
+            is_system: false,
+            is_expanded: exported_folder.is_expanded,
+            created_at: now,
+            updated_at: now,
+        };
+        next_order_by_folder.insert(folder.id, 0);
+        folder_ids_by_name.insert(key, folder.id);
+        folders.push(folder);
+        created_folders += 1;
+    }
+
+    let mut imported_profiles = envelope.profiles.clone();
+    imported_profiles.sort_by(|left, right| {
+        left.folder_name
+            .as_ref()
+            .map(|name| name.to_lowercase())
+            .cmp(&right.folder_name.as_ref().map(|name| name.to_lowercase()))
+            .then_with(|| left.display_order.cmp(&right.display_order))
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+
+    for ep in &imported_profiles {
         // Duplicate check: same name + host
         let is_duplicate = profiles.iter().any(|existing| {
             existing.name == ep.name && existing.host == ep.host
@@ -877,7 +1000,12 @@ pub async fn import_profiles(
 
         let now = chrono::Utc::now();
         let new_id = Uuid::new_v4();
-        let max_order = profiles.iter().map(|p| p.display_order).max().unwrap_or(0);
+        let target_folder_id = ep
+            .folder_name
+            .as_ref()
+            .and_then(|folder_name| folder_ids_by_name.get(&folder_name.trim().to_lowercase()).copied())
+            .unwrap_or(system_folder_id);
+        let next_display_order = next_order_by_folder.get(&target_folder_id).copied().unwrap_or(0);
         let new_profile = ConnectionProfile {
             id: new_id,
             name: ep.name.clone(),
@@ -888,8 +1016,8 @@ pub async fn import_profiles(
             users: users.clone(),
             startup_directory: None,
             tunnels: Vec::new(),
-            display_order: max_order + 1,
-            folder_id: None,
+            display_order: next_display_order,
+            folder_id: Some(target_folder_id),
             created_at: now,
             updated_at: now,
         };
@@ -917,22 +1045,22 @@ pub async fn import_profiles(
         }
 
         profiles.push(new_profile);
+        next_order_by_folder.insert(target_folder_id, next_display_order + 1);
         imported += 1;
     }
 
     // Persist if anything was imported — use envelope format (no re-migration cycle)
-    if imported > 0 {
-        let folders = state.folders.lock().await;
+    if imported > 0 || created_folders > 0 {
         let envelope = ProfilesEnvelope {
             folders: folders.clone(),
             profiles: profiles.clone(),
         };
-        drop(folders);
         profile::save_profiles_envelope(&envelope, app_data_dir.as_ref())?;
     }
 
-    // Drop profiles lock before acquiring vault lock (avoid deadlock)
+    // Drop state locks before acquiring vault lock (avoid deadlock)
     drop(profiles);
+    drop(folders);
 
     // Store imported credentials in vault
     if !credentials_to_store.is_empty() {
@@ -1031,11 +1159,58 @@ fn decrypt_export_data(data: &[u8], password: &str) -> Result<Vec<u8>, AppError>
 // ─── Tests ───────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
+    mod tests {
     use super::*;
     use crate::fs_secure::BestEffortOutcome;
-    use crate::profile::{DeleteFolderResult, Folder, ProfilesEnvelope};
+    use crate::profile::{DeleteFolderResult, Folder};
     use std::io;
+
+    #[test]
+    fn build_export_envelope_preserves_folder_structure() {
+        let now = chrono::Utc::now();
+        let system = Folder {
+            id: Uuid::new_v4(),
+            name: crate::profile::SYSTEM_FOLDER_NAME.to_string(),
+            display_order: 0,
+            is_system: true,
+            is_expanded: true,
+            created_at: now,
+            updated_at: now,
+        };
+        let proxmox = Folder {
+            id: Uuid::new_v4(),
+            name: "PROXMOX".to_string(),
+            display_order: 1,
+            is_system: false,
+            is_expanded: false,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let mut grouped = ConnectionProfile::default();
+        grouped.name = "zammad".to_string();
+        grouped.host = "192.168.2.56".to_string();
+        grouped.port = 22;
+        grouped.display_order = 4;
+        grouped.folder_id = Some(proxmox.id);
+
+        let mut ungrouped = ConnectionProfile::default();
+        ungrouped.name = "root".to_string();
+        ungrouped.host = "192.168.2.74".to_string();
+        ungrouped.port = 22;
+        ungrouped.display_order = 1;
+        ungrouped.folder_id = Some(system.id);
+
+        let envelope = build_export_envelope(&[ungrouped, grouped], &[system, proxmox.clone()]);
+
+        assert_eq!(envelope.version, 3);
+        assert_eq!(envelope.folders.len(), 1, "system folder must not be exported as a user folder");
+        assert_eq!(envelope.folders[0].name, proxmox.name);
+        assert_eq!(envelope.profiles.len(), 2);
+        assert_eq!(envelope.profiles[0].folder_name, None, "system-folder profiles should import into Ungrouped by default");
+        assert_eq!(envelope.profiles[1].folder_name.as_deref(), Some("PROXMOX"));
+        assert_eq!(envelope.profiles[1].display_order, 4);
+    }
 
     // ── P7.1 / P7.2 — ExportResult shape and warning mapping ────────────────
     //
